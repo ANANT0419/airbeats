@@ -14,8 +14,8 @@ let current = null; // current song (null = free play)
 let handsOn = false;
 
 const HINTS = {
-  drums: 'Hold a fist like you are gripping sticks. Swing down onto a pad to hit it. Hit the pad when its ring closes in.',
-  piano: 'Point with your index finger and tap down onto a key. Hit each key as its glass tile reaches it.',
+  drums: 'Make fists like you are holding sticks. Hover the white stick head over a pad (it lights up), then make a quick downward tap. Hit when the ring closes in.',
+  piano: 'Hover your index fingertip over a key, then make a quick little downward tap. Hit each key as its glass tile reaches it.',
 };
 
 function store(key, val) {

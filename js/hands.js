@@ -44,8 +44,8 @@ export async function createHandTracker() {
     runningMode: 'VIDEO',
     numHands: 2,
     minHandDetectionConfidence: 0.5,
-    minHandPresenceConfidence: 0.5,
-    minTrackingConfidence: 0.5,
+    minHandPresenceConfidence: 0.4,
+    minTrackingConfidence: 0.3, // keep hold of the hand through fast, blurry swings
   });
   let landmarker;
   try {

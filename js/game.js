@@ -6,7 +6,8 @@ const PERFECT = 0.075; // seconds
 const GOOD = 0.16;
 const LEAD_BEATS = 4; // count-in
 // Strike speed thresholds (fraction of the short screen side per second)
-const SENS = { low: 1.25, medium: 0.85, high: 0.5 };
+// Downward stroke speed needed for a hit (fraction of the short screen side per second)
+const SENS = { low: 0.9, medium: 0.6, high: 0.38 };
 
 function rgba(hex, a) {
   const n = parseInt(hex.slice(1), 16);
@@ -38,7 +39,8 @@ export class Game {
     this.mode = null;
     this.lanes = [];
     this.flash = [];
-    this.ptrs = new Map();
+    this.ptrList = [];
+    this.hover = new Set();
     this.hands = [];
     this.popups = [];
     this.particles = [];
@@ -68,7 +70,7 @@ export class Game {
 
   setMode(mode) {
     this.mode = mode;
-    this.ptrs.clear();
+    this.ptrList = [];
     this.layout();
   }
 
@@ -79,8 +81,9 @@ export class Game {
     } else if (this.mode === 'piano') {
       const left = w * 0.05;
       const kw = (w * 0.9) / PIANO_LANES.length;
-      const top = h * 0.6;
-      const bottom = h * 0.9;
+      // Keys sit mid-screen so your wrist stays in the camera view while you tap.
+      const top = h * 0.5;
+      const bottom = h * 0.76;
       this.lanes = PIANO_LANES.map((l, i) => ({
         ...l,
         x0: left + i * kw + 4,
@@ -102,7 +105,7 @@ export class Game {
       let bd = Infinity;
       this.lanes.forEach((l, i) => {
         const d = Math.hypot(x - l.cx, y - l.cy);
-        if (d < l.rad * 1.1 && d < bd) {
+        if (d < l.rad * 1.3 && d < bd) {
           bd = d;
           best = i;
         }
@@ -110,7 +113,7 @@ export class Game {
       return best;
     }
     if (this.mode === 'piano') {
-      return this.lanes.findIndex((l) => x >= l.x0 - 4 && x <= l.x1 + 4 && y >= l.top && y <= l.bottom + 30);
+      return this.lanes.findIndex((l) => x >= l.x0 - 4 && x <= l.x1 + 4 && y >= l.top - 20 && y <= l.bottom + 30);
     }
     return -1;
   }
@@ -230,79 +233,92 @@ export class Game {
   }
 
   processHands(raw, now) {
+    const md = this.md;
     this.hands = raw.map((h) => {
       const pts = h.landmarks.map((p) => this.toScreen(p));
-      const base = pts[9];
-      const dx = pts[9].x - pts[0].x;
-      const dy = pts[9].y - pts[0].y;
-      const len = Math.hypot(dx, dy) || 1;
-      const stickLen = this.md * 0.24;
-      const tip = { x: base.x + (dx / len) * stickLen, y: base.y + (dy / len) * stickLen };
-      return { side: h.side, pts, base, tip };
+      // Knuckle centre is the steadiest part of a fist. The stick head sits a short, fixed
+      // distance above it, so wrist wobble does not swing the hit point around.
+      const k = [5, 9, 13].reduce((a, i) => ({ x: a.x + pts[i].x / 3, y: a.y + pts[i].y / 3 }), { x: 0, y: 0 });
+      const tip = { x: k.x, y: k.y - md * 0.06 };
+      return { side: h.side, pts, base: pts[0], tip };
     });
-    const pointers = this.hands.map((h) =>
-      this.mode === 'drums' ? { id: h.side, ...h.tip } : { id: h.side, ...h.pts[8] }
-    );
-    this.updatePointers(pointers, now);
+    const points = this.hands.map((h) => (this.mode === 'drums' ? { ...h.tip } : { ...h.pts[8] }));
+    this.updatePointers(points, now);
   }
 
-  updatePointers(list, now) {
-    const seen = new Set();
+  // Pointers are matched to last frame's by distance, not by the tracker's left/right label,
+  // which can flip or repeat between frames.
+  updatePointers(points, now) {
     const md = this.md;
-    const th = SENS[this.settings.sensitivity] * md * (this.mode === 'piano' ? 0.45 : 1);
-    for (const p of list) {
-      seen.add(p.id);
-      let st = this.ptrs.get(p.id);
+    const th = SENS[this.settings.sensitivity] * md * (this.mode === 'piano' ? 0.6 : 1);
+    if (!Array.isArray(this.ptrList)) this.ptrList = [];
+    const free = new Set(this.ptrList);
+    this.hover = new Set();
+
+    for (const p of points) {
+      let st = null;
+      let bd = md * 0.35;
+      for (const s of free) {
+        const d = Math.hypot(s.rx - p.x, s.ry - p.y);
+        if (d < bd) {
+          bd = d;
+          st = s;
+        }
+      }
       if (!st) {
-        const lane = this.laneAt(p.x, p.y);
-        this.ptrs.set(p.id, { x: p.x, y: p.y, t: now, vx: 0, vy: 0, inside: lane, armed: false, hitY: p.y });
+        st = { x: p.x, y: p.y, rx: p.x, ry: p.y, t: now, vx: 0, vy: 0, armed: false, flash: 0 };
+        this.ptrList.push(st);
         continue;
       }
+      free.delete(st);
       const dt = Math.max(1 / 120, now - st.t);
-      const nx = st.x + (p.x - st.x) * 0.8;
-      const ny = st.y + (p.y - st.y) * 0.8;
-      st.vx = st.vx * 0.3 + ((nx - st.x) / dt) * 0.7;
-      st.vy = st.vy * 0.3 + ((ny - st.y) / dt) * 0.7;
-      const speed = Math.hypot(st.vx, st.vy);
-      const laneNow = this.laneAt(nx, ny);
-      const dirOK = this.mode === 'piano' ? st.vy > 0.12 * md : st.vy > -0.3 * md;
+      if (dt > 0.2) {
+        // Tracking dropped for a while: restart cleanly instead of reading the jump as a strike.
+        Object.assign(st, { x: p.x, y: p.y, rx: p.x, ry: p.y, t: now, vx: 0, vy: 0, armed: false });
+        continue;
+      }
+      // Adaptive smoothing: steady when still, responsive when swinging.
+      const jump = Math.hypot(p.x - st.x, p.y - st.y);
+      const a = Math.min(0.9, 0.35 + jump / (md * 0.05));
+      const nx = st.x + (p.x - st.x) * a;
+      const ny = st.y + (p.y - st.y) * a;
+      const keep = dt > 0.05 ? 0 : 0.4; // after a skipped frame, trust the fresh motion
+      st.vx = st.vx * keep + ((nx - st.x) / dt) * (1 - keep);
+      st.vy = st.vy * keep + ((ny - st.y) / dt) * (1 - keep);
 
-      // Did the path since last frame enter a new pad? (catches fast swings)
-      let entered = -1;
-      for (let k = 1; k <= 6; k++) {
-        const l = this.laneAt(st.x + ((nx - st.x) * k) / 6, st.y + ((ny - st.y) * k) / 6);
-        if (l !== -1 && l !== st.inside) {
-          entered = l;
-          break;
-        }
-      }
+      const lane = this.laneAt(nx, ny);
+      const prevLane = this.laneAt(st.x, st.y);
+      if (lane !== -1) this.hover.add(lane);
 
-      if (entered !== -1 && speed > th && dirOK) {
-        this.hit(entered, speed / (th * 2.5), 'hand');
+      // A strike = a quick downward stroke. Re-arms once the stroke stops or reverses,
+      // so you can hit the same pad again and again.
+      if (st.vy < th * 0.3) st.armed = true;
+      const downward = st.vy > th && st.vy > Math.abs(st.vx) * 0.6;
+      if (st.armed && downward) {
+        const target = lane !== -1 ? lane : prevLane;
         st.armed = false;
-        st.hitY = ny;
-      } else if (laneNow !== -1 && laneNow === st.inside) {
-        // Re-strike inside the same pad: lift up from the bottom of the last swing, then come down fast.
-        if (!st.armed) {
-          st.hitY = Math.max(st.hitY, ny);
-          if (ny < st.hitY - 0.05 * md) st.armed = true;
-        }
-        if (st.armed && st.vy > th * 0.9) {
-          this.hit(laneNow, st.vy / (th * 2.5), 'hand');
-          st.armed = false;
-          st.hitY = ny;
-        }
+        st.flash = 1;
+        if (target !== -1) this.hit(target, st.vy / (th * 2.5), 'hand');
       }
-      if (laneNow !== st.inside && entered === -1) {
-        st.armed = false;
-        st.hitY = ny;
-      }
-      st.inside = laneNow;
       st.x = nx;
       st.y = ny;
+      st.rx = p.x;
+      st.ry = p.y;
       st.t = now;
     }
-    for (const id of [...this.ptrs.keys()]) if (!seen.has(id)) this.ptrs.delete(id);
+    // A hand that vanishes mid-downstroke was almost always lost to motion blur during a strike:
+    // count it as a hit where the stroke was heading.
+    for (const s of free) {
+      if (s.armed && s.vy > th * 0.7) {
+        s.armed = false;
+        s.flash = 1;
+        const lane = this.laneAt(s.x + s.vx * 0.04, s.y + s.vy * 0.04);
+        const target = lane !== -1 ? lane : this.laneAt(s.x, s.y);
+        if (target !== -1) this.hit(target, s.vy / (th * 2.5), 'hand');
+      }
+    }
+    // Keep briefly-lost pointers so a missed frame mid-swing does not reset them.
+    this.ptrList = this.ptrList.filter((s) => !free.has(s) || now - s.t < 0.3);
   }
 
   hit(lane, vel, source) {
@@ -431,6 +447,7 @@ export class Game {
       else this.drawPiano(songT);
     }
     this.drawHands();
+    this.drawStrikes(dt);
     this.drawEffects(dt);
     if (this.song && this.playing) this.drawCountdown(songT);
 
@@ -535,6 +552,7 @@ export class Game {
     const glow = this.upcomingGlow(songT);
     this.lanes.forEach((l, i) => {
       const { cx, cy, rad } = l;
+      if (this.hover.has(i)) glow[i] = Math.max(glow[i], 0.35);
       const path = () => {
         ctx.beginPath();
         ctx.arc(cx, cy, rad, 0, TAU);
@@ -614,6 +632,7 @@ export class Game {
       const wd = l.x1 - l.x0;
       const ht = l.bottom - l.top;
       const press = this.flash[i] * 6;
+      if (this.hover.has(i)) glow[i] = Math.max(glow[i], 0.35);
       this.glass(() => roundRectPath(ctx, x, y + press, wd, ht, 14), { x, y, w: wd, h: ht + press }, l.color, glow[i], this.flash[i]);
       ctx.beginPath();
       ctx.moveTo(x + 12, y + press + 8);
@@ -651,7 +670,9 @@ export class Game {
         ctx.stroke();
       }
       if (this.mode === 'drums') {
-        const { base, tip } = hand;
+        const { tip } = hand;
+        // Draw the stick from below the fist up through the head.
+        const base = { x: tip.x + (hand.pts[0].x - tip.x) * 0.6, y: tip.y + (hand.pts[0].y - tip.y) * 0.6 };
         const g = ctx.createLinearGradient(base.x, base.y, tip.x, tip.y);
         g.addColorStop(0, '#b0763c');
         g.addColorStop(1, '#f5d7a8');
@@ -666,6 +687,19 @@ export class Game {
       } else if (this.mode === 'piano') {
         this.dot(pts[8].x, pts[8].y, 10, '#ffffff');
       }
+    }
+  }
+
+  drawStrikes(dt) {
+    const ctx = this.ctx;
+    for (const s of this.ptrList) {
+      if (s.flash <= 0) continue;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 10 + (1 - s.flash) * 30, 0, TAU);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = `rgba(255,255,255,${s.flash})`;
+      ctx.stroke();
+      s.flash = Math.max(0, s.flash - dt * 4);
     }
   }
 

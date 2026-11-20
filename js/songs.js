@@ -13,14 +13,15 @@ export const PIANO_LANES = [
 ];
 
 // x, y are fractions of the screen; r is a fraction of the shorter screen side.
+// Pads stay in the upper two-thirds so your fists never leave the camera view.
 export const DRUM_LANES = [
-  { id: 'hihat', name: 'Hi-Hat', x: 0.14, y: 0.50, r: 0.10, color: '#06d6a0' },
-  { id: 'snare', name: 'Snare', x: 0.30, y: 0.72, r: 0.12, color: '#ef476f' },
-  { id: 'tom1', name: 'Tom 1', x: 0.40, y: 0.36, r: 0.10, color: '#4cc9f0' },
-  { id: 'kick', name: 'Kick', x: 0.50, y: 0.74, r: 0.11, color: '#ff6bd6' },
-  { id: 'tom2', name: 'Tom 2', x: 0.60, y: 0.36, r: 0.10, color: '#7b6cff' },
-  { id: 'floor', name: 'Floor', x: 0.70, y: 0.72, r: 0.12, color: '#f78c6b' },
-  { id: 'crash', name: 'Crash', x: 0.86, y: 0.42, r: 0.11, color: '#ffd166' },
+  { id: 'hihat', name: 'Hi-Hat', x: 0.13, y: 0.46, r: 0.10, color: '#06d6a0' },
+  { id: 'snare', name: 'Snare', x: 0.30, y: 0.60, r: 0.12, color: '#ef476f' },
+  { id: 'tom1', name: 'Tom 1', x: 0.40, y: 0.30, r: 0.10, color: '#4cc9f0' },
+  { id: 'kick', name: 'Kick', x: 0.50, y: 0.62, r: 0.11, color: '#ff6bd6' },
+  { id: 'tom2', name: 'Tom 2', x: 0.60, y: 0.30, r: 0.10, color: '#7b6cff' },
+  { id: 'floor', name: 'Floor', x: 0.70, y: 0.60, r: 0.12, color: '#f78c6b' },
+  { id: 'crash', name: 'Crash', x: 0.87, y: 0.40, r: 0.11, color: '#ffd166' },
 ];
 const DL = Object.fromEntries(DRUM_LANES.map((l, i) => [l.id, i]));
 
