@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>AirBeats</title>
+  <meta name="description" content="Play drums and piano in the air with your webcam." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <video id="video" playsinline muted></video>
+  <canvas id="stage"></canvas>
+
+  <!-- Intro -->
+  <section id="intro" class="screen">
+    <div class="glass-card hero">
+      <h1>Air<span>Beats</span></h1>
+      <p class="tag">Wave your hands. Make the music.</p>
+      <p class="sub">Your camera tracks your hands. Strike the glowing glass pads in time to bring a song to life.</p>
+      <button id="btn-camera" class="btn primary">Turn on camera</button>
+      <button id="btn-mouse" class="btn ghost">Play with mouse / touch</button>
+      <p id="status" class="status" aria-live="polite"></p>
+      <p class="privacy">Video stays on your device. Nothing is uploaded.</p>
+    </div>
+  </section>
+
+  <!-- Menu -->
+  <section id="menu" class="screen hidden">
+    <div class="glass-card menu-card">
+      <div class="menu-head">
+        <h2>Air<span>Beats</span></h2>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-mode="drums" role="tab">🥁 Drums</button>
+          <button class="tab" data-mode="piano" role="tab">🎹 Piano</button>
+        </div>
+      </div>
+      <p id="mode-hint" class="hint"></p>
+      <div id="songs" class="songs"></div>
+      <details class="settings">
+        <summary>Settings</summary>
+        <label>Hit sensitivity
+          <select id="set-sens">
+            <option value="low">Low (strike hard)</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High (light taps)</option>
+          </select>
+        </label>
+        <label>Camera delay fix <span id="lat-val">60 ms</span>
+          <input id="set-lat" type="range" min="0" max="200" step="10" value="60" />
+        </label>
+        <label class="row"><input id="set-skel" type="checkbox" checked /> Show hand skeleton</label>
+      </details>
+      <p id="notice" class="status"></p>
+    </div>
+  </section>
+
+  <!-- HUD -->
+  <section id="hud" class="hidden">
+    <div class="hud-top">
+      <button id="btn-pause" class="btn icon" aria-label="Pause">❚❚</button>
+      <div class="hud-title">
+        <div id="hud-song"></div>
+        <div class="progress"><div id="hud-progress"></div></div>
+      </div>
+      <div class="hud-stats" id="hud-stats">
+        <div><small>Score</small><b id="hud-score">0</b></div>
+        <div><small>Accuracy</small><b id="hud-acc">100%</b></div>
+        <div class="band"><small>Band</small><div class="meter"><div id="hud-band"></div></div></div>
+      </div>
+    </div>
+    <div id="hud-combo" class="combo"></div>
+  </section>
+
+  <!-- Pause -->
+  <section id="pause" class="screen hidden">
+    <div class="glass-card small">
+      <h2>Paused</h2>
+      <button id="btn-resume" class="btn primary">Resume</button>
+      <button id="btn-restart" class="btn ghost">Restart</button>
+      <button id="btn-quit" class="btn ghost">Back to menu</button>
+    </div>
+  </section>
+
+  <!-- Results -->
+  <section id="results" class="screen hidden">
+    <div class="glass-card small">
+      <p class="hint" id="res-song"></p>
+      <div id="res-stars" class="stars"></div>
+      <h2 id="res-title"></h2>
+      <div class="res-score" id="res-score"></div>
+      <div class="res-grid">
+        <div><small>Perfect</small><b id="res-perfect"></b></div>
+        <div><small>Good</small><b id="res-good"></b></div>
+        <div><small>Miss</small><b id="res-miss"></b></div>
+        <div><small>Wrong pad</small><b id="res-wrong"></b></div>
+        <div><small>Max combo</small><b id="res-combo"></b></div>
+        <div><small>Accuracy</small><b id="res-acc"></b></div>
+      </div>
+      <button id="btn-again" class="btn primary">Play again</button>
+      <button id="btn-menu" class="btn ghost">Song list</button>
+    </div>
+  </section>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
