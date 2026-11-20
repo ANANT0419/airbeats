@@ -1,7 +1,15 @@
 // Camera + MediaPipe hand tracking.
-// MediaPipe Tasks Vision 0.10.14 and the hand model are bundled in /vendor so the game runs without a CDN.
-const VISION = new URL('../vendor/mediapipe', import.meta.url).href;
-const MODEL = new URL('../vendor/models/hand_landmarker.task', import.meta.url).href;
+// MediaPipe Tasks Vision 0.10.14: use the copy bundled in /vendor when present, otherwise the public CDN.
+const SOURCES = [
+  {
+    vision: new URL('../vendor/mediapipe', import.meta.url).href,
+    model: new URL('../vendor/models/hand_landmarker.task', import.meta.url).href,
+  },
+  {
+    vision: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14',
+    model: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+  },
+];
 
 export async function startCamera(video) {
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -13,8 +21,23 @@ export async function startCamera(video) {
   return stream;
 }
 
+async function pickSource() {
+  for (const src of SOURCES) {
+    try {
+      const head = await fetch(src.model, { method: 'HEAD' });
+      if (!head.ok) continue;
+      const lib = await import(`${src.vision}/vision_bundle.mjs`);
+      return { ...src, lib };
+    } catch {
+      // try the next source
+    }
+  }
+  throw new Error('Could not load hand tracking');
+}
+
 export async function createHandTracker() {
-  const { FilesetResolver, HandLandmarker } = await import(`${VISION}/vision_bundle.mjs`);
+  const { vision: VISION, model: MODEL, lib } = await pickSource();
+  const { FilesetResolver, HandLandmarker } = lib;
   const fileset = await FilesetResolver.forVisionTasks(`${VISION}/wasm`);
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL, delegate },
