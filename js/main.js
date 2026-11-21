@@ -9,13 +9,23 @@ const show = (el, on = true) => el.classList.toggle('hidden', !on);
 const audio = new AudioEngine();
 const game = new Game($('stage'), audio, { onStats, onEnd });
 window.__airbeats = { game, audio }; // handy for debugging in devtools
-let mode = 'drums';
+let mode = 'synth';
 let current = null; // current song (null = free play)
 let handsOn = false;
 
+// Melody modes share the same in-key songs.
+const SONG_SET = { synth: SONGS.piano, piano: SONGS.piano, drums: SONGS.drums };
 const HINTS = {
-  drums: 'Make fists like you are holding sticks. Hover the white stick head over a pad (it lights up), then make a quick downward tap. Hit when the ring closes in.',
-  piano: 'Hover your index fingertip over a key, then make a quick little downward tap. Hit each key as its glass tile reaches it.',
+  hands: {
+    synth: 'Move your hand left or right to pick a note. Pinch thumb and index finger to play, hold to sustain, slide while pinched to glide. Raise your hand for a brighter sound, tilt it for vibrato.',
+    piano: 'Move your hand over a key, then pinch thumb and index finger to strike it. Open and pinch again for the next note.',
+    drums: 'Move your hand over a pad, then pinch thumb and index finger to hit it. Use both hands.',
+  },
+  touch: {
+    synth: 'Touch a column to play, hold to sustain, slide to glide. Tilt the phone toward you for a brighter sound, roll it for vibrato.',
+    piano: 'Tap the glass keys. Use several fingers for chords.',
+    drums: 'Tap the pads. Use both thumbs.',
+  },
 };
 
 function store(key, val) {
@@ -48,6 +58,7 @@ $('btn-camera').addEventListener('click', async () => {
     const tracker = await createHandTracker();
     game.setSource(video, tracker);
     handsOn = true;
+    $('notice').textContent = '';
   } catch (e) {
     console.warn(e);
     $('notice').textContent = 'Hand tracking could not load, so mouse / touch is on instead.';
@@ -55,9 +66,17 @@ $('btn-camera').addEventListener('click', async () => {
   openMenu();
 });
 
-$('btn-mouse').addEventListener('click', () => {
+$('btn-mouse').addEventListener('click', async () => {
   audio.init();
-  $('notice').textContent = 'Mouse / touch mode: click or tap the pads and keys.';
+  // Phone tilt shapes the sound. iOS asks for permission, and it must be asked from this tap.
+  try {
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') await DOE.requestPermission();
+    window.addEventListener('deviceorientation', (e) => game.setTilt(e.beta, e.gamma));
+  } catch (e) {
+    console.warn(e);
+  }
+  $('notice').textContent = '';
   openMenu();
 });
 
@@ -82,10 +101,10 @@ document.querySelectorAll('.tab').forEach((t) =>
 );
 
 function renderSongs() {
-  $('mode-hint').textContent = HINTS[mode] + (handsOn ? '' : ' (Or just click / tap.)');
+  $('mode-hint').textContent = HINTS[handsOn ? 'hands' : 'touch'][mode];
   const wrap = $('songs');
   wrap.innerHTML = '';
-  for (const s of SONGS[mode]) {
+  for (const s of SONG_SET[mode]) {
     const best = store(`best:${mode}:${s.id}`);
     const b = document.createElement('button');
     b.className = 'song';
@@ -104,7 +123,7 @@ function renderSongs() {
   wrap.appendChild(f);
 }
 
-$('set-sens').addEventListener('change', (e) => (game.settings.sensitivity = e.target.value));
+$('set-pinch').addEventListener('change', (e) => (game.settings.pinch = e.target.value));
 $('set-lat').addEventListener('input', (e) => {
   game.settings.latency = Number(e.target.value) / 1000;
   $('lat-val').textContent = `${e.target.value} ms`;
@@ -119,7 +138,8 @@ function play(song) {
   show($('pause'), false);
   show($('hud'));
   show($('hud-stats'), !!song);
-  $('hud-song').textContent = song ? song.title : `Free Play · ${mode === 'drums' ? 'Drums' : 'Piano'}`;
+  const names = { synth: 'Synth', piano: 'Piano', drums: 'Drums' };
+  $('hud-song').textContent = song ? `${song.title} · ${names[mode]}` : `Free Play · ${names[mode]}`;
   $('hud-combo').textContent = '';
   $('hud-progress').style.width = '0';
   game.setMode(mode);

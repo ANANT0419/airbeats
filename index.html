@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>AirBeats</title>
-  <meta name="description" content="Play drums and piano in the air with your webcam." />
+  <meta name="description" content="A motion synth in your browser: pinch the air or touch and tilt your phone to play in-key music." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" />
   <link rel="stylesheet" href="css/style.css" />
@@ -17,10 +17,10 @@
   <section id="intro" class="screen">
     <div class="glass-card hero">
       <h1>Air<span>Beats</span></h1>
-      <p class="tag">Wave your hands. Make the music.</p>
-      <p class="sub">Your camera tracks your hands. Strike the glowing glass pads in time to bring a song to life.</p>
-      <button id="btn-camera" class="btn primary">Turn on camera</button>
-      <button id="btn-mouse" class="btn ghost">Play with mouse / touch</button>
+      <p class="tag">Pinch the air. Play the music.</p>
+      <p class="sub">Every note is in key. Pinch to play a note, move to change it, raise or tilt your hand to shape the sound.</p>
+      <button id="btn-camera" class="btn primary">Play with hands (camera)</button>
+      <button id="btn-mouse" class="btn ghost">Play with touch &amp; tilt (phone)</button>
       <p id="status" class="status" aria-live="polite"></p>
       <p class="privacy">Video stays on your device. Nothing is uploaded.</p>
     </div>
@@ -32,23 +32,24 @@
       <div class="menu-head">
         <h2>Air<span>Beats</span></h2>
         <div class="tabs" role="tablist">
-          <button class="tab active" data-mode="drums" role="tab">🥁 Drums</button>
-          <button class="tab" data-mode="piano" role="tab">🎹 Piano</button>
+          <button class="tab active" data-mode="synth" role="tab">Synth</button>
+          <button class="tab" data-mode="piano" role="tab">Piano</button>
+          <button class="tab" data-mode="drums" role="tab">Drums</button>
         </div>
       </div>
       <p id="mode-hint" class="hint"></p>
       <div id="songs" class="songs"></div>
       <details class="settings">
         <summary>Settings</summary>
-        <label>Hit sensitivity
-          <select id="set-sens">
-            <option value="low">Low (strike hard)</option>
-            <option value="medium" selected>Medium</option>
-            <option value="high">High (light taps)</option>
+        <label>Pinch
+          <select id="set-pinch">
+            <option value="easy">Easy (fingers close)</option>
+            <option value="normal" selected>Normal (fingers touch)</option>
+            <option value="firm">Firm (squeeze)</option>
           </select>
         </label>
-        <label>Camera delay fix <span id="lat-val">60 ms</span>
-          <input id="set-lat" type="range" min="0" max="200" step="10" value="60" />
+        <label>Camera delay fix <span id="lat-val">50 ms</span>
+          <input id="set-lat" type="range" min="0" max="200" step="10" value="50" />
         </label>
         <label class="row"><input id="set-skel" type="checkbox" checked /> Show hand skeleton</label>
       </details>

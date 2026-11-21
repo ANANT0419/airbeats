@@ -1,13 +1,22 @@
 import { PIANO_LANES, DRUM_LANES, CHORDS } from './songs.js';
 import { HAND_CONNECTIONS } from './hands.js';
 
+// Gesture model (inspired by motion synths such as the AUUG Motion Synth):
+//   * A note is TRIGGERED by something instant and unambiguous: a pinch (thumb + index) in
+//     front of the camera, or a finger touch on screen.
+//   * Where you are picks WHICH note (a column of an in-key scale, or a drum pad).
+//   * Motion only SHAPES a note that is already sounding: hand height = brightness,
+//     hand / phone tilt = vibrato. Shaping is continuous, so camera delay is not felt.
+
 const TAU = Math.PI * 2;
-const PERFECT = 0.075; // seconds
-const GOOD = 0.16;
-const LEAD_BEATS = 4; // count-in
-// Strike speed thresholds (fraction of the short screen side per second)
-// Downward stroke speed needed for a hit (fraction of the short screen side per second)
-const SENS = { low: 0.9, medium: 0.6, high: 0.38 };
+const PERFECT = 0.08;
+const GOOD = 0.17;
+const LEAD_BEATS = 4;
+const HUD_H = 96;
+// Pinch thresholds: thumb-index gap divided by hand size (wrist to middle knuckle).
+const PINCH = { easy: [0.36, 0.5], normal: [0.28, 0.42], firm: [0.2, 0.34] };
+
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
 
 function rgba(hex, a) {
   const n = parseInt(hex.slice(1), 16);
@@ -31,25 +40,28 @@ export class Game {
     this.ctx = canvas.getContext('2d');
     this.audio = audio;
     this.hooks = hooks; // { onStats, onEnd }
-    this.settings = { sensitivity: 'medium', latency: 0.06, skeleton: true };
+    this.settings = { pinch: 'normal', latency: 0.05, skeleton: true };
     this.blur = document.createElement('canvas');
     this.blur.width = 160;
     this.blur.height = 90;
     this.bctx = this.blur.getContext('2d');
-    this.mode = null;
+    this.mode = null; // 'synth' | 'piano' | 'drums'
     this.lanes = [];
     this.flash = [];
-    this.ptrList = [];
     this.hover = new Set();
+    this.cursors = []; // tracked hands
+    this.touches = new Map(); // pointerId -> handle
     this.hands = [];
+    this.tilt = null;
     this.popups = [];
     this.particles = [];
     this.playing = false;
     this.song = null;
+    this.notes = [];
     this.lastHud = 0;
     window.addEventListener('resize', () => this.resize());
     this.resize();
-    this.bindMouse();
+    this.bindPointer();
     requestAnimationFrame((t) => this.frame(t));
   }
 
@@ -63,35 +75,82 @@ export class Game {
     this.layout();
   }
 
+  // Run hand detection as soon as each camera frame arrives (not on the next screen refresh).
   setSource(video, tracker) {
     this.video = video;
     this.tracker = tracker;
+    if (!tracker) return;
+    const run = () => {
+      try {
+        const raw = tracker.detect(video);
+        if (raw) this.processHands(raw, performance.now() / 1000);
+      } catch (e) {
+        console.warn(e);
+      }
+    };
+    if (video.requestVideoFrameCallback) {
+      const loop = () => {
+        run();
+        video.requestVideoFrameCallback(loop);
+      };
+      video.requestVideoFrameCallback(loop);
+    } else {
+      const loop = () => {
+        run();
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    }
+  }
+
+  setTilt(beta, gamma) {
+    if (beta == null || gamma == null) return;
+    if (!this.tiltBase) this.tiltBase = { beta, gamma };
+    this.tilt = { beta: beta - this.tiltBase.beta, gamma: gamma - this.tiltBase.gamma };
   }
 
   setMode(mode) {
+    this.releaseAll();
     this.mode = mode;
-    this.ptrList = [];
     this.layout();
   }
 
   layout() {
-    const { w, h, md } = this;
+    const { w, h } = this;
+    const left = w * 0.04;
+    const width = w * 0.92;
+    const top = HUD_H + 8;
+    const bottom = h - 20;
     if (this.mode === 'drums') {
-      this.lanes = DRUM_LANES.map((l) => ({ ...l, cx: l.x * w, cy: l.y * h, rad: l.r * md }));
-    } else if (this.mode === 'piano') {
-      const left = w * 0.05;
-      const kw = (w * 0.9) / PIANO_LANES.length;
-      // Keys sit mid-screen so your wrist stays in the camera view while you tap.
-      const top = h * 0.5;
-      const bottom = h * 0.76;
+      const cols = w < h ? 3 : 4;
+      const rows = Math.ceil(DRUM_LANES.length / cols);
+      const gap = 14;
+      const cw = (width - gap * (cols - 1)) / cols;
+      const rh = (bottom - top - gap * (rows - 1)) / rows;
+      // Kit-like arrangement (cymbals and toms on top, snare / kick / floor below).
+      // Lane indices stay as in songs.js; only the on-screen slot changes.
+      const order = ['crash', 'hihat', 'tom1', 'tom2', 'snare', 'kick', 'floor'];
+      this.lanes = DRUM_LANES.map((l) => {
+        const i = order.indexOf(l.id);
+        const r = Math.floor(i / cols);
+        const inRow = r === rows - 1 ? DRUM_LANES.length - r * cols : cols;
+        const offset = ((cols - inRow) * (cw + gap)) / 2; // centre a short last row
+        const x0 = left + offset + (i % cols) * (cw + gap);
+        const y0 = top + r * (rh + gap);
+        return { ...l, x0, y0, x1: x0 + cw, y1: y0 + rh, cx: x0 + cw / 2, cy: y0 + rh / 2 };
+      });
+    } else if (this.mode) {
+      const n = PIANO_LANES.length;
+      const kw = width / n;
+      this.hitY = top + (bottom - top) * 0.62;
       this.lanes = PIANO_LANES.map((l, i) => ({
         ...l,
         x0: left + i * kw + 4,
         x1: left + (i + 1) * kw - 4,
-        top,
-        bottom,
+        y0: top,
+        y1: bottom,
         cx: left + (i + 0.5) * kw,
-        cy: (top + bottom) / 2,
+        cy: this.hitY,
       }));
     } else {
       this.lanes = [];
@@ -99,33 +158,199 @@ export class Game {
     this.flash = this.lanes.map(() => 0);
   }
 
+  // Columns span the full height, so for melody only left/right matters.
   laneAt(x, y) {
+    if (!this.mode || y < HUD_H) return -1;
     if (this.mode === 'drums') {
-      let best = -1;
-      let bd = Infinity;
-      this.lanes.forEach((l, i) => {
-        const d = Math.hypot(x - l.cx, y - l.cy);
-        if (d < l.rad * 1.3 && d < bd) {
+      return this.lanes.findIndex((l) => x >= l.x0 - 7 && x <= l.x1 + 7 && y >= l.y0 - 7 && y <= l.y1 + 7);
+    }
+    const first = this.lanes[0];
+    const last = this.lanes[this.lanes.length - 1];
+    if (x < first.x0 - 4 || x > last.x1 + 4) return -1;
+    let best = 0;
+    let bd = Infinity;
+    this.lanes.forEach((l, i) => {
+      const d = Math.abs(x - l.cx);
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    });
+    return best;
+  }
+
+  // ---------- playing notes (shared by pinch and touch) ----------
+  // A handle is one finger / one hand holding a note: { lane, voice }.
+  press(handle, lane, expr, source) {
+    handle.lane = lane;
+    if (lane < 0 || !this.mode || this.paused) return;
+    this.audio.init();
+    const l = this.lanes[lane];
+    if (this.mode === 'drums') this.audio.drum(l.id, 0.95);
+    else if (this.mode === 'piano') this.audio.piano(l.midi, 0.85);
+    else {
+      handle.voice = handle.voice || this.audio.voice();
+      handle.voice.expr(expr.bright, expr.vib);
+      handle.voice.on(l.midi);
+    }
+    this.flash[lane] = 1;
+    this.judge(lane, source);
+  }
+
+  move(handle, lane, expr, source) {
+    if (handle.voice) handle.voice.expr(expr.bright, expr.vib);
+    // In synth mode, sliding a held note into another column glides to that note.
+    if (this.mode === 'synth' && handle.voice && lane !== -1 && lane !== handle.lane) {
+      handle.lane = lane;
+      handle.voice.glide(this.lanes[lane].midi);
+      this.flash[lane] = 1;
+      this.judge(lane, source);
+    }
+  }
+
+  release(handle) {
+    if (handle.voice) {
+      this.audio.freeVoice(handle.voice);
+      handle.voice = null;
+    }
+    handle.lane = -1;
+  }
+
+  releaseAll() {
+    for (const c of this.cursors) if (c.pinched) this.release(c);
+    for (const t of this.touches.values()) this.release(t);
+    this.touches.clear();
+    this.cursors.forEach((c) => (c.pinched = false));
+  }
+
+  // ---------- touch / mouse (phone mode) ----------
+  pointerExpr(x, y) {
+    let bright = clamp(1 - (y - HUD_H) / (this.h - HUD_H));
+    let vib = 0;
+    if (this.tilt) {
+      // Tip the phone toward you for a brighter sound, roll it left/right for vibrato.
+      bright = clamp(0.55 - this.tilt.beta / 50);
+      vib = clamp((Math.abs(this.tilt.gamma) - 6) / 30);
+    }
+    return { bright, vib };
+  }
+
+  bindPointer() {
+    const c = this.canvas;
+    c.addEventListener('pointerdown', (e) => {
+      if (!this.mode) return;
+      e.preventDefault();
+      c.setPointerCapture?.(e.pointerId);
+      const handle = { lane: -1, voice: null, x: e.clientX, y: e.clientY };
+      this.touches.set(e.pointerId, handle);
+      this.press(handle, this.laneAt(e.clientX, e.clientY), this.pointerExpr(e.clientX, e.clientY), 'touch');
+      if (handle.lane !== -1) this.burst(e.clientX, e.clientY, this.lanes[handle.lane].color, 8);
+    });
+    c.addEventListener('pointermove', (e) => {
+      const handle = this.touches.get(e.pointerId);
+      if (!handle) return;
+      handle.x = e.clientX;
+      handle.y = e.clientY;
+      this.move(handle, this.laneAt(e.clientX, e.clientY), this.pointerExpr(e.clientX, e.clientY), 'touch');
+    });
+    const end = (e) => {
+      const handle = this.touches.get(e.pointerId);
+      if (!handle) return;
+      this.release(handle);
+      this.touches.delete(e.pointerId);
+    };
+    c.addEventListener('pointerup', end);
+    c.addEventListener('pointercancel', end);
+  }
+
+  // ---------- hands (camera mode) ----------
+  processHands(raw, now) {
+    const v = this.video;
+    const vw = v.videoWidth || 640;
+    const vh = v.videoHeight || 480;
+    const s = Math.max(this.w / vw, this.h / vh);
+    const dw = vw * s;
+    const dh = vh * s;
+    const ox = (this.w - dw) / 2;
+    const oy = (this.h - dh) / 2;
+    const toScreen = (p) => ({ x: this.w - (ox + p.x * dw), y: oy + p.y * dh });
+    const d3 = (a, b) => Math.hypot((a.x - b.x) * vw, (a.y - b.y) * vh, (a.z - b.z) * vw);
+
+    this.hands = raw.map((hand) => {
+      const lm = hand.landmarks;
+      const pts = lm.map(toScreen);
+      const size = d3(lm[0], lm[9]) || 1;
+      const gap = d3(lm[4], lm[8]) / size;
+      const cur = { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 };
+      // Hand roll: angle of wrist -> middle knuckle away from straight up.
+      const roll = Math.atan2(pts[9].x - pts[0].x, pts[0].y - pts[9].y);
+      return { pts, gap, cur, roll };
+    });
+
+    const [onT, offT] = PINCH[this.settings.pinch] || PINCH.normal;
+    const free = new Set(this.cursors);
+    for (const hd of this.hands) {
+      let c = null;
+      let bd = this.md * 0.3;
+      for (const k of free) {
+        const d = Math.hypot(k.rx - hd.cur.x, k.ry - hd.cur.y);
+        if (d < bd) {
           bd = d;
-          best = i;
+          c = k;
         }
-      });
-      return best;
+      }
+      if (!c) {
+        c = { x: hd.cur.x, y: hd.cur.y, rx: hd.cur.x, ry: hd.cur.y, pinched: false, lane: -1, voice: null, gap: hd.gap };
+        this.cursors.push(c);
+      }
+      free.delete(c);
+      // Light smoothing: steady when still, follows quickly when moving.
+      const jump = Math.hypot(hd.cur.x - c.x, hd.cur.y - c.y);
+      const a = Math.min(1, 0.45 + jump / (this.md * 0.04));
+      c.x += (hd.cur.x - c.x) * a;
+      c.y += (hd.cur.y - c.y) * a;
+      c.rx = hd.cur.x;
+      c.ry = hd.cur.y;
+      c.gap = hd.gap;
+      c.seen = now;
+      c.on = onT;
+      c.off = offT;
+      c.hand = hd;
+      const expr = {
+        bright: clamp(1 - (c.y - HUD_H) / (this.h - HUD_H)),
+        vib: clamp((Math.abs(hd.roll) - 0.3) / 0.5),
+      };
+      const lane = this.laneAt(c.x, c.y);
+      c.hover = lane;
+      if (!c.pinched && hd.gap < onT) {
+        c.pinched = true;
+        c.pop = 1;
+        this.press(c, lane, expr, 'hand');
+      } else if (c.pinched && hd.gap > offT) {
+        c.pinched = false;
+        this.release(c);
+      } else if (c.pinched) {
+        this.move(c, lane, expr, 'hand');
+      }
     }
-    if (this.mode === 'piano') {
-      return this.lanes.findIndex((l) => x >= l.x0 - 4 && x <= l.x1 + 4 && y >= l.top - 20 && y <= l.bottom + 30);
-    }
-    return -1;
+    // A hand that disappears for a moment keeps its note; gone for longer, the note stops.
+    this.cursors = this.cursors.filter((c) => {
+      if (!free.has(c) || now - c.seen < 0.25) return true;
+      if (c.pinched) this.release(c);
+      return false;
+    });
+    this.hover = new Set(this.cursors.map((c) => c.hover).filter((l) => l !== -1 && l != null));
   }
 
   // ---------- song lifecycle ----------
   start(song) {
     this.audio.init();
+    this.audio.warmUp();
     this.song = song;
     this.paused = false;
     const spb = 60 / (song?.bpm || 100);
     this.spb = spb;
-    this.approach = this.mode === 'piano' ? 2.0 : 1.5;
+    this.approach = this.mode === 'drums' ? 1.6 : 2.2;
     this.stats = { score: 0, combo: 0, maxCombo: 0, perfect: 0, good: 0, miss: 0, wrong: 0 };
     this.recent = [1, 0.5, 1, 0.5];
     this.popups = [];
@@ -155,7 +380,7 @@ export class Game {
     for (const ch of song.chords) {
       const c = CHORDS[ch.name];
       ev.push({ t: beat * spb, type: 'pad', notes: c.notes, dur: ch.beats * spb });
-      if (this.mode === 'piano') {
+      if (this.mode !== 'drums') {
         for (let b = 0; b < ch.beats; b += 2) {
           ev.push({ t: (beat + b) * spb, type: 'bass', midi: c.root, dur: Math.min(2, ch.beats - b) * spb * 0.9 });
         }
@@ -185,6 +410,7 @@ export class Game {
   }
 
   stop() {
+    this.releaseAll();
     this.playing = false;
     this.song = null;
     this.notes = [];
@@ -194,6 +420,7 @@ export class Game {
 
   pause(on) {
     this.paused = on;
+    if (on) this.releaseAll();
     if (!this.audio.ctx) return;
     if (on) this.audio.ctx.suspend();
     else this.audio.ctx.resume();
@@ -203,134 +430,10 @@ export class Game {
     return this.audio.now - this.startTime;
   }
 
-  // ---------- input ----------
-  bindMouse() {
-    let lastLane = -1;
-    this.canvas.addEventListener('pointerdown', (e) => {
-      const lane = this.laneAt(e.clientX, e.clientY);
-      lastLane = lane;
-      if (lane !== -1) this.hit(lane, 0.9, 'mouse');
-    });
-    this.canvas.addEventListener('pointermove', (e) => {
-      if (!e.buttons || this.mode !== 'piano') return;
-      const lane = this.laneAt(e.clientX, e.clientY);
-      if (lane !== -1 && lane !== lastLane) this.hit(lane, 0.8, 'mouse');
-      lastLane = lane;
-    });
-    this.canvas.addEventListener('pointerup', () => (lastLane = -1));
-  }
-
-  toScreen(p) {
-    const v = this.video;
-    const vw = v.videoWidth || 1280;
-    const vh = v.videoHeight || 720;
-    const s = Math.max(this.w / vw, this.h / vh);
-    const dw = vw * s;
-    const dh = vh * s;
-    const ox = (this.w - dw) / 2;
-    const oy = (this.h - dh) / 2;
-    return { x: this.w - (ox + p.x * dw), y: oy + p.y * dh };
-  }
-
-  processHands(raw, now) {
-    const md = this.md;
-    this.hands = raw.map((h) => {
-      const pts = h.landmarks.map((p) => this.toScreen(p));
-      // Knuckle centre is the steadiest part of a fist. The stick head sits a short, fixed
-      // distance above it, so wrist wobble does not swing the hit point around.
-      const k = [5, 9, 13].reduce((a, i) => ({ x: a.x + pts[i].x / 3, y: a.y + pts[i].y / 3 }), { x: 0, y: 0 });
-      const tip = { x: k.x, y: k.y - md * 0.06 };
-      return { side: h.side, pts, base: pts[0], tip };
-    });
-    const points = this.hands.map((h) => (this.mode === 'drums' ? { ...h.tip } : { ...h.pts[8] }));
-    this.updatePointers(points, now);
-  }
-
-  // Pointers are matched to last frame's by distance, not by the tracker's left/right label,
-  // which can flip or repeat between frames.
-  updatePointers(points, now) {
-    const md = this.md;
-    const th = SENS[this.settings.sensitivity] * md * (this.mode === 'piano' ? 0.6 : 1);
-    if (!Array.isArray(this.ptrList)) this.ptrList = [];
-    const free = new Set(this.ptrList);
-    this.hover = new Set();
-
-    for (const p of points) {
-      let st = null;
-      let bd = md * 0.35;
-      for (const s of free) {
-        const d = Math.hypot(s.rx - p.x, s.ry - p.y);
-        if (d < bd) {
-          bd = d;
-          st = s;
-        }
-      }
-      if (!st) {
-        st = { x: p.x, y: p.y, rx: p.x, ry: p.y, t: now, vx: 0, vy: 0, armed: false, flash: 0 };
-        this.ptrList.push(st);
-        continue;
-      }
-      free.delete(st);
-      const dt = Math.max(1 / 120, now - st.t);
-      if (dt > 0.2) {
-        // Tracking dropped for a while: restart cleanly instead of reading the jump as a strike.
-        Object.assign(st, { x: p.x, y: p.y, rx: p.x, ry: p.y, t: now, vx: 0, vy: 0, armed: false });
-        continue;
-      }
-      // Adaptive smoothing: steady when still, responsive when swinging.
-      const jump = Math.hypot(p.x - st.x, p.y - st.y);
-      const a = Math.min(0.9, 0.35 + jump / (md * 0.05));
-      const nx = st.x + (p.x - st.x) * a;
-      const ny = st.y + (p.y - st.y) * a;
-      const keep = dt > 0.05 ? 0 : 0.4; // after a skipped frame, trust the fresh motion
-      st.vx = st.vx * keep + ((nx - st.x) / dt) * (1 - keep);
-      st.vy = st.vy * keep + ((ny - st.y) / dt) * (1 - keep);
-
-      const lane = this.laneAt(nx, ny);
-      const prevLane = this.laneAt(st.x, st.y);
-      if (lane !== -1) this.hover.add(lane);
-
-      // A strike = a quick downward stroke. Re-arms once the stroke stops or reverses,
-      // so you can hit the same pad again and again.
-      if (st.vy < th * 0.3) st.armed = true;
-      const downward = st.vy > th && st.vy > Math.abs(st.vx) * 0.6;
-      if (st.armed && downward) {
-        const target = lane !== -1 ? lane : prevLane;
-        st.armed = false;
-        st.flash = 1;
-        if (target !== -1) this.hit(target, st.vy / (th * 2.5), 'hand');
-      }
-      st.x = nx;
-      st.y = ny;
-      st.rx = p.x;
-      st.ry = p.y;
-      st.t = now;
-    }
-    // A hand that vanishes mid-downstroke was almost always lost to motion blur during a strike:
-    // count it as a hit where the stroke was heading.
-    for (const s of free) {
-      if (s.armed && s.vy > th * 0.7) {
-        s.armed = false;
-        s.flash = 1;
-        const lane = this.laneAt(s.x + s.vx * 0.04, s.y + s.vy * 0.04);
-        const target = lane !== -1 ? lane : this.laneAt(s.x, s.y);
-        if (target !== -1) this.hit(target, s.vy / (th * 2.5), 'hand');
-      }
-    }
-    // Keep briefly-lost pointers so a missed frame mid-swing does not reset them.
-    this.ptrList = this.ptrList.filter((s) => !free.has(s) || now - s.t < 0.3);
-  }
-
-  hit(lane, vel, source) {
-    if (!this.mode || lane < 0 || this.paused) return;
-    this.audio.init();
+  judge(lane, source) {
     const l = this.lanes[lane];
-    if (this.mode === 'drums') this.audio.drum(l.id, vel);
-    else this.audio.piano(l.midi, vel);
-    this.flash[lane] = 1;
-
     if (!this.song || !this.playing) {
-      this.burst(l.cx, l.cy, l.color, 8);
+      this.burst(l.cx, l.cy, l.color, 6);
       return;
     }
     const t = this.songTime - (source === 'hand' ? this.settings.latency : 0);
@@ -346,7 +449,7 @@ export class Game {
       }
     }
     const s = this.stats;
-    const py = this.mode === 'drums' ? l.cy - l.rad - 18 : l.top - 24;
+    const py = this.mode === 'drums' ? l.y0 + 26 : this.hitY - 40;
     if (best) {
       const perfect = bd <= PERFECT;
       best.state = perfect ? 'perfect' : 'good';
@@ -357,7 +460,7 @@ export class Game {
       s.score += Math.round((perfect ? 100 : 50) * mult);
       this.recent.push(perfect ? 1 : 0.8);
       this.popup(l.cx, py, perfect ? 'PERFECT' : 'GOOD', perfect ? '#7dffcf' : '#9ad7ff');
-      this.burst(l.cx, l.cy, l.color, perfect ? 22 : 12);
+      this.burst(l.cx, this.mode === 'drums' ? l.cy : this.hitY, l.color, perfect ? 22 : 12);
     } else {
       s.wrong++;
       s.combo = 0;
@@ -376,7 +479,7 @@ export class Game {
         this.stats.combo = 0;
         this.recent.push(0);
         const l = this.lanes[n.lane];
-        this.popup(l.cx, this.mode === 'drums' ? l.cy - l.rad - 18 : l.top - 24, 'MISS', '#ffb3c0');
+        this.popup(l.cx, this.mode === 'drums' ? l.y0 + 26 : this.hitY - 40, 'MISS', '#ffb3c0');
       }
     }
   }
@@ -408,20 +511,9 @@ export class Game {
     const dt = Math.min(0.05, now - (this.lastFrame || now));
     this.lastFrame = now;
 
-    if (this.tracker && this.video) {
-      try {
-        const raw = this.tracker.detect(this.video);
-        if (raw) this.processHands(raw, now);
-      } catch (e) {
-        console.warn(e);
-      }
-    }
-
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawBackground(now);
-
-    // Frosted copy of the background for the glass surfaces
     this.bctx.drawImage(this.canvas, 0, 0, this.blur.width, this.blur.height);
 
     let songT = 0;
@@ -435,6 +527,7 @@ export class Game {
       songT = this.songTime;
       if (songT > this.endTime) {
         this.playing = false;
+        this.releaseAll();
         this.audio.setBackingLevel(0);
         this.hooks.onEnd?.(this.results());
       }
@@ -442,12 +535,9 @@ export class Game {
       songT = this.songTime;
     }
 
-    if (this.mode) {
-      if (this.mode === 'drums') this.drawDrums(songT);
-      else this.drawPiano(songT);
-    }
-    this.drawHands();
-    this.drawStrikes(dt);
+    if (this.mode === 'drums') this.drawPads(songT);
+    else if (this.mode) this.drawColumns(songT);
+    this.drawHands(dt);
     this.drawEffects(dt);
     if (this.song && this.playing) this.drawCountdown(songT);
 
@@ -461,7 +551,7 @@ export class Game {
         score: s.score,
         combo: s.combo,
         accuracy: judged ? (s.perfect + s.good * 0.7) / judged : 1,
-        progress: Math.max(0, Math.min(1, songT / this.endTime)),
+        progress: clamp(songT / this.endTime),
         band: this.bandLevel || 0,
       });
     }
@@ -480,7 +570,7 @@ export class Game {
       ctx.scale(-1, 1);
       ctx.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh);
       ctx.restore();
-      ctx.fillStyle = 'rgba(8,6,24,0.38)';
+      ctx.fillStyle = 'rgba(8,6,24,0.42)';
       ctx.fillRect(0, 0, w, h);
     } else {
       const g = ctx.createLinearGradient(0, 0, w, h);
@@ -488,8 +578,7 @@ export class Game {
       g.addColorStop(1, '#05111f');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
-      const blobs = [['#7b6cff', 0.3, 0.3], ['#ff6bd6', 0.7, 0.6], ['#06d6a0', 0.5, 0.9]];
-      blobs.forEach(([c, x, y], i) => {
+      [['#7b6cff', 0.3, 0.3], ['#ff6bd6', 0.7, 0.6], ['#06d6a0', 0.5, 0.9]].forEach(([c, x, y], i) => {
         const bx = (x + Math.sin(now * 0.3 + i) * 0.08) * w;
         const by = (y + Math.cos(now * 0.25 + i * 2) * 0.08) * h;
         const rg = ctx.createRadialGradient(bx, by, 0, bx, by, this.md * 0.6);
@@ -501,42 +590,43 @@ export class Game {
     }
   }
 
-  // Shared "mirror glass" surface: frosted background + tint + sheen + specular rim
+  // Shared "mirror glass" surface: frosted background + tint + sheen + rim
   glass(pathFn, box, color, glow, flash) {
     const ctx = this.ctx;
     ctx.save();
     pathFn();
     ctx.clip();
     ctx.drawImage(this.blur, 0, 0, this.w, this.h);
-    ctx.fillStyle = `rgba(255,255,255,${0.06 + flash * 0.25})`;
+    ctx.fillStyle = `rgba(255,255,255,${0.05 + flash * 0.25})`;
     ctx.fillRect(box.x, box.y, box.w, box.h);
-    ctx.fillStyle = rgba(color, 0.12 + glow * 0.3 + flash * 0.45);
+    ctx.fillStyle = rgba(color, 0.08 + glow * 0.3 + flash * 0.45);
     ctx.fillRect(box.x, box.y, box.w, box.h);
-    const g = ctx.createLinearGradient(box.x, box.y, box.x + box.w, box.y + box.h);
-    g.addColorStop(0, 'rgba(255,255,255,0.5)');
-    g.addColorStop(0.3, 'rgba(255,255,255,0.1)');
+    const g = ctx.createLinearGradient(box.x, box.y, box.x + box.w, box.y + box.h * 0.6);
+    g.addColorStop(0, 'rgba(255,255,255,0.4)');
+    g.addColorStop(0.3, 'rgba(255,255,255,0.08)');
     g.addColorStop(0.48, 'rgba(255,255,255,0)');
-    g.addColorStop(0.52, 'rgba(255,255,255,0.12)');
+    g.addColorStop(0.52, 'rgba(255,255,255,0.1)');
     g.addColorStop(0.62, 'rgba(255,255,255,0)');
-    g.addColorStop(1, 'rgba(255,255,255,0.2)');
+    g.addColorStop(1, 'rgba(255,255,255,0.15)');
     ctx.fillStyle = g;
     ctx.fillRect(box.x, box.y, box.w, box.h);
     ctx.restore();
 
     ctx.save();
-    if (glow > 0.05 || flash > 0.05) {
+    const lit = Math.max(glow, flash);
+    if (lit > 0.05) {
       ctx.shadowColor = color;
-      ctx.shadowBlur = 10 + 30 * Math.max(glow, flash);
+      ctx.shadowBlur = 10 + 30 * lit;
     }
     pathFn();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = `rgba(255,255,255,${0.45 + 0.4 * Math.max(glow, flash)})`;
+    ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.5 * lit})`;
     ctx.stroke();
     ctx.restore();
   }
 
   upcomingGlow(songT) {
-    const glow = this.lanes.map(() => 0);
+    const glow = this.lanes.map((_, i) => (this.hover.has(i) ? 0.3 : 0));
     if (!this.song) return glow;
     for (const n of this.notes) {
       const d = n.t - songT;
@@ -547,48 +637,66 @@ export class Game {
     return glow;
   }
 
-  drawDrums(songT) {
+  label(text, x, y, size, alpha = 0.95) {
+    const ctx = this.ctx;
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.font = `700 ${size}px Outfit, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y);
+  }
+
+  drawColumns(songT) {
     const ctx = this.ctx;
     const glow = this.upcomingGlow(songT);
     this.lanes.forEach((l, i) => {
-      const { cx, cy, rad } = l;
-      if (this.hover.has(i)) glow[i] = Math.max(glow[i], 0.35);
-      const path = () => {
-        ctx.beginPath();
-        ctx.arc(cx, cy, rad, 0, TAU);
-      };
-      this.glass(path, { x: cx - rad, y: cy - rad, w: rad * 2, h: rad * 2 }, l.color, glow[i], this.flash[i]);
-      // inner tinted ring + specular arc
-      ctx.beginPath();
-      ctx.arc(cx, cy, rad - 6, 0, TAU);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = rgba(l.color, 0.55 + glow[i] * 0.45);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(cx, cy, rad * 0.8, Math.PI * 1.08, Math.PI * 1.42);
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,255,255,0.92)';
-      ctx.font = `600 ${Math.max(11, rad * 0.24)}px Outfit, system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(l.name, cx, cy);
+      const wd = l.x1 - l.x0;
+      const ht = l.y1 - l.y0;
+      this.glass(() => roundRectPath(ctx, l.x0, l.y0, wd, ht, 18), { x: l.x0, y: l.y0, w: wd, h: ht }, l.color, glow[i], this.flash[i]);
+      this.label(l.name, l.cx, l.y1 - 34, Math.max(16, wd * 0.24));
     });
+    // "Play now" line
+    const a = this.lanes[0];
+    const b = this.lanes[this.lanes.length - 1];
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(a.x0, this.hitY - 1, b.x1 - a.x0, 2);
 
     if (!this.song) return;
-    // Approach rings close in on the pad you need to hit
+    const th = Math.max(24, this.h * 0.05);
+    for (const n of this.notes) {
+      const d = n.t - songT;
+      if (d > this.approach) break;
+      if (n.state || d < -GOOD) continue;
+      const l = this.lanes[n.lane];
+      const p = 1 - d / this.approach;
+      const yb = l.y0 + 10 + p * (this.hitY - l.y0 - 10);
+      const x = l.x0 + 8;
+      const wd = l.x1 - l.x0 - 16;
+      this.glass(() => roundRectPath(ctx, x, yb - th, wd, th, 10), { x, y: yb - th, w: wd, h: th }, l.color, 0.95, 0);
+    }
+  }
+
+  drawPads(songT) {
+    const ctx = this.ctx;
+    const glow = this.upcomingGlow(songT);
+    this.lanes.forEach((l, i) => {
+      const wd = l.x1 - l.x0;
+      const ht = l.y1 - l.y0;
+      this.glass(() => roundRectPath(ctx, l.x0, l.y0, wd, ht, 22), { x: l.x0, y: l.y0, w: wd, h: ht }, l.color, glow[i], this.flash[i]);
+      this.label(l.name, l.cx, l.cy, Math.max(15, Math.min(wd, ht) * 0.16));
+    });
+    if (!this.song) return;
+    // A ring closes in on the pad to hit next
     for (const n of this.notes) {
       const d = n.t - songT;
       if (d > this.approach) break;
       if (n.state || d < -GOOD) continue;
       const l = this.lanes[n.lane];
       const s = Math.max(0, d / this.approach);
-      ctx.beginPath();
-      ctx.arc(l.cx, l.cy, l.rad * (1 + 1.4 * s), 0, TAU);
+      const grow = 40 * s;
+      roundRectPath(ctx, l.x0 - grow, l.y0 - grow, l.x1 - l.x0 + grow * 2, l.y1 - l.y0 + grow * 2, 22 + grow);
       ctx.lineWidth = 2 + 4 * (1 - s);
-      ctx.strokeStyle = rgba(l.color, 0.3 + 0.7 * (1 - s));
+      ctx.strokeStyle = rgba(l.color, 0.25 + 0.75 * (1 - s));
       ctx.shadowColor = l.color;
       ctx.shadowBlur = 16;
       ctx.stroke();
@@ -596,123 +704,45 @@ export class Game {
     }
   }
 
-  drawPiano(songT) {
+  drawHands(dt) {
     const ctx = this.ctx;
-    const glow = this.upcomingGlow(songT);
-    const topY = 96; // below the HUD bar
-    // lane guides
-    this.lanes.forEach((l) => {
-      const g = ctx.createLinearGradient(0, topY, 0, l.top);
-      g.addColorStop(0, 'rgba(255,255,255,0)');
-      g.addColorStop(1, rgba(l.color, 0.12));
-      ctx.fillStyle = g;
-      ctx.fillRect(l.x0, topY, l.x1 - l.x0, l.top - topY);
-    });
-
-    // falling glass tiles
-    if (this.song) {
-      const th = Math.max(26, this.h * 0.06);
-      for (const n of this.notes) {
-        const d = n.t - songT;
-        if (d > this.approach) break;
-        if (n.state || d < -GOOD) continue;
-        const l = this.lanes[n.lane];
-        const p = 1 - d / this.approach;
-        const yb = topY + p * (l.top - topY);
-        const x = l.x0 + 6;
-        const wd = l.x1 - l.x0 - 12;
-        const y = yb - th;
-        this.glass(() => roundRectPath(ctx, x, y, wd, th, 10), { x, y, w: wd, h: th }, l.color, 0.9, 0);
-      }
-    }
-
-    this.lanes.forEach((l, i) => {
-      const x = l.x0;
-      const y = l.top;
-      const wd = l.x1 - l.x0;
-      const ht = l.bottom - l.top;
-      const press = this.flash[i] * 6;
-      if (this.hover.has(i)) glow[i] = Math.max(glow[i], 0.35);
-      this.glass(() => roundRectPath(ctx, x, y + press, wd, ht, 14), { x, y, w: wd, h: ht + press }, l.color, glow[i], this.flash[i]);
+    if (this.settings.skeleton) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(x + 12, y + press + 8);
-      ctx.lineTo(x + wd * 0.55, y + press + 8);
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,255,255,0.95)';
-      ctx.font = `700 ${Math.max(14, wd * 0.22)}px Outfit, system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(l.name, l.cx, l.bottom - ht * 0.22 + press);
-    });
-
-    // hit line
-    const l0 = this.lanes[0];
-    const lN = this.lanes[this.lanes.length - 1];
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillRect(l0.x0, l0.top - 2, lN.x1 - l0.x0, 2);
-  }
-
-  drawHands() {
-    const ctx = this.ctx;
-    for (const hand of this.hands) {
-      const { pts } = hand;
-      if (this.settings.skeleton) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
+      for (const hand of this.hands) {
         for (const [a, b] of HAND_CONNECTIONS) {
-          ctx.moveTo(pts[a].x, pts[a].y);
-          ctx.lineTo(pts[b].x, pts[b].y);
+          ctx.moveTo(hand.pts[a].x, hand.pts[a].y);
+          ctx.lineTo(hand.pts[b].x, hand.pts[b].y);
         }
-        ctx.stroke();
       }
-      if (this.mode === 'drums') {
-        const { tip } = hand;
-        // Draw the stick from below the fist up through the head.
-        const base = { x: tip.x + (hand.pts[0].x - tip.x) * 0.6, y: tip.y + (hand.pts[0].y - tip.y) * 0.6 };
-        const g = ctx.createLinearGradient(base.x, base.y, tip.x, tip.y);
-        g.addColorStop(0, '#b0763c');
-        g.addColorStop(1, '#f5d7a8');
-        ctx.strokeStyle = g;
-        ctx.lineWidth = Math.max(7, this.md * 0.014);
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(base.x, base.y);
-        ctx.lineTo(tip.x, tip.y);
-        ctx.stroke();
-        this.dot(tip.x, tip.y, Math.max(7, this.md * 0.014), '#ffffff');
-      } else if (this.mode === 'piano') {
-        this.dot(pts[8].x, pts[8].y, 10, '#ffffff');
-      }
-    }
-  }
-
-  drawStrikes(dt) {
-    const ctx = this.ctx;
-    for (const s of this.ptrList) {
-      if (s.flash <= 0) continue;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, 10 + (1 - s.flash) * 30, 0, TAU);
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = `rgba(255,255,255,${s.flash})`;
       ctx.stroke();
-      s.flash = Math.max(0, s.flash - dt * 4);
     }
-  }
-
-  dot(x, y, r, color) {
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.shadowColor = '#9ad7ff';
-    ctx.shadowBlur = 18;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, TAU);
-    ctx.fill();
-    ctx.restore();
+    // Pinch cursor: the inner dot grows as your fingers close; solid when the note is on.
+    for (const c of this.cursors) {
+      const color = c.hover >= 0 && this.lanes[c.hover] ? this.lanes[c.hover].color : '#ffffff';
+      const closeness = clamp((c.off - c.gap) / (c.off - c.on + 0.12));
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur = c.pinched ? 30 : 10;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 22, 0, TAU);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = c.pinched ? color : 'rgba(255,255,255,0.85)';
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.pinched ? 16 : 4 + 10 * closeness, 0, TAU);
+      ctx.fillStyle = c.pinched ? color : 'rgba(255,255,255,0.6)';
+      ctx.fill();
+      if (c.pop > 0) {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 22 + (1 - c.pop) * 30, 0, TAU);
+        ctx.strokeStyle = rgba(color === '#ffffff' ? '#ffffff' : color, c.pop);
+        ctx.stroke();
+        c.pop = Math.max(0, c.pop - dt * 4);
+      }
+      ctx.restore();
+    }
   }
 
   drawEffects(dt) {
@@ -749,14 +779,14 @@ export class Game {
     const text = left > 0 ? String(Math.min(LEAD_BEATS, Math.ceil(left / this.spb))) : 'GO!';
     const frac = left > 0 ? (left / this.spb) % 1 : 1 - (songT - lead) / (this.spb * 0.6);
     ctx.save();
-    ctx.globalAlpha = Math.max(0, Math.min(1, frac + 0.2));
+    ctx.globalAlpha = clamp(frac + 0.2);
     ctx.fillStyle = '#fff';
     ctx.shadowColor = '#7b6cff';
     ctx.shadowBlur = 40;
     ctx.font = `800 ${this.md * 0.18}px Outfit, system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, this.w / 2, this.h * 0.2);
+    ctx.fillText(text, this.w / 2, this.h * 0.3);
     ctx.restore();
   }
 }

@@ -13,7 +13,8 @@ const SOURCES = [
 
 export async function startCamera(video) {
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+    // A smaller frame is tracked faster; a higher frame rate means less delay per gesture.
+    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 }, facingMode: 'user' },
     audio: false,
   });
   video.srcObject = stream;

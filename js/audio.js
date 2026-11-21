@@ -2,6 +2,83 @@
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
+// A synth voice whose oscillators run all the time. Playing a note only opens its gain gate
+// and moves the pitch, so there is no setup cost between your gesture and the sound.
+class Voice {
+  constructor(engine) {
+    const ctx = engine.ctx;
+    this.ctx = ctx;
+    this.busy = false;
+    this.filter = ctx.createBiquadFilter();
+    this.filter.type = 'lowpass';
+    this.filter.frequency.value = 1800;
+    this.filter.Q.value = 3;
+    this.gate = ctx.createGain();
+    this.gate.gain.value = 0;
+    this.filter.connect(this.gate);
+    this.gate.connect(engine.sfx);
+    this.gate.connect(engine.reverbSend);
+
+    this.lfo = ctx.createOscillator();
+    this.lfo.frequency.value = 5.5;
+    this.lfoDepth = ctx.createGain();
+    this.lfoDepth.gain.value = 0;
+    this.lfo.connect(this.lfoDepth);
+
+    this.oscs = [
+      ['sawtooth', 1, -6, 0.32],
+      ['sawtooth', 1, 6, 0.32],
+      ['sine', 0.5, 0, 0.5],
+    ].map(([type, mult, det, amp]) => {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.detune.value = det;
+      const g = ctx.createGain();
+      g.gain.value = amp;
+      o.connect(g).connect(this.filter);
+      this.lfoDepth.connect(o.detune);
+      o.start();
+      return { o, mult };
+    });
+    this.lfo.start();
+  }
+
+  setPitch(midi, glide) {
+    const t = this.ctx.currentTime;
+    const f = mtof(midi);
+    for (const { o, mult } of this.oscs) {
+      o.frequency.cancelScheduledValues(t);
+      if (glide) o.frequency.setTargetAtTime(f * mult, t, 0.035);
+      else o.frequency.setValueAtTime(f * mult, t);
+    }
+  }
+
+  on(midi, vel = 0.9) {
+    const t = this.ctx.currentTime;
+    this.setPitch(midi, false);
+    this.gate.gain.cancelScheduledValues(t);
+    this.gate.gain.setValueAtTime(this.gate.gain.value, t);
+    this.gate.gain.linearRampToValueAtTime(0.28 * vel, t + 0.006);
+  }
+
+  glide(midi) {
+    this.setPitch(midi, true);
+  }
+
+  // bright 0..1 opens the filter, vib 0..1 adds vibrato
+  expr(bright, vib) {
+    const t = this.ctx.currentTime;
+    this.filter.frequency.setTargetAtTime(250 + bright * bright * 6500, t, 0.03);
+    this.lfoDepth.gain.setTargetAtTime(vib * 45, t, 0.06);
+  }
+
+  off() {
+    const t = this.ctx.currentTime;
+    this.gate.gain.cancelScheduledValues(t);
+    this.gate.gain.setTargetAtTime(0, t, 0.07);
+  }
+}
+
 export class AudioEngine {
   init() {
     if (this.ctx) {
@@ -39,6 +116,29 @@ export class AudioEngine {
     this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  }
+
+  // Borrow a free synth voice (a small pool is created once and reused).
+  voice() {
+    if (!this.voices) this.voices = [];
+    let v = this.voices.find((x) => !x.busy);
+    if (!v && this.voices.length < 8) {
+      v = new Voice(this);
+      this.voices.push(v);
+    }
+    if (!v) v = this.voices[0];
+    v.busy = true;
+    return v;
+  }
+
+  freeVoice(v) {
+    v.off();
+    v.busy = false;
+  }
+
+  warmUp() {
+    const vs = [0, 1, 2, 3].map(() => this.voice());
+    vs.forEach((v) => this.freeVoice(v));
   }
 
   get now() {
