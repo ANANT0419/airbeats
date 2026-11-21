@@ -21,8 +21,16 @@ html, body {
   -webkit-tap-highlight-color: transparent;
 }
 
-#video { display: none; }
-#stage { position: fixed; inset: 0; width: 100vw; height: 100vh; touch-action: none; }
+/* The camera is shown directly by the browser (smooth, full frame rate), mirrored like a selfie. */
+#video { display: none; position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); }
+#video.live { display: block; }
+.chip { flex: none; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--muted); background: rgba(0,0,0,0.25); font-variant-numeric: tabular-nums; }
+.chip.lost { color: #ffd166; }
+.progress.cal { height: 8px; margin: 18px 0 6px; }
+#cal-meter { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+#calibrate { background: transparent; }
+#calibrate .glass-card { background: rgba(10, 8, 30, 0.55); }
+#stage { position: fixed; inset: 0; width: 100vw; height: 100vh; touch-action: none; background: transparent; }
 
 .hidden { display: none !important; }
 

@@ -39,6 +39,7 @@
       </div>
       <p id="mode-hint" class="hint"></p>
       <div id="songs" class="songs"></div>
+      <button id="btn-calibrate" class="btn ghost hidden">Teach AirBeats my hand (15 seconds)</button>
       <details class="settings">
         <summary>Settings</summary>
         <label>Pinch
@@ -46,6 +47,14 @@
             <option value="easy">Easy (fingers close)</option>
             <option value="normal" selected>Normal (fingers touch)</option>
             <option value="firm">Firm (squeeze)</option>
+            <option value="mine" id="opt-mine" disabled>My hand (calibrated)</option>
+          </select>
+        </label>
+        <label>Pitch
+          <select id="set-snap">
+            <option value="snap" selected>Snap to notes (always in tune)</option>
+            <option value="soft">Soft snap (bendy)</option>
+            <option value="free">Free (theremin)</option>
           </select>
         </label>
         <label>Camera delay fix <span id="lat-val">50 ms</span>
@@ -65,6 +74,7 @@
         <div id="hud-song"></div>
         <div class="progress"><div id="hud-progress"></div></div>
       </div>
+      <div id="track-chip" class="chip hidden"></div>
       <div class="hud-stats" id="hud-stats">
         <div><small>Score</small><b id="hud-score">0</b></div>
         <div><small>Accuracy</small><b id="hud-acc">100%</b></div>
@@ -72,6 +82,17 @@
       </div>
     </div>
     <div id="hud-combo" class="combo"></div>
+  </section>
+
+  <!-- Hand calibration -->
+  <section id="calibrate" class="screen hidden">
+    <div class="glass-card small">
+      <p class="hint" id="cal-step">Step 1</p>
+      <h2 id="cal-text">Hold one hand up, open, palm facing the camera.</h2>
+      <div class="progress cal"><div id="cal-meter"></div></div>
+      <p class="hint" id="cal-live"></p>
+      <button id="btn-cal-done" class="btn ghost">Back to menu</button>
+    </div>
   </section>
 
   <!-- Pause -->

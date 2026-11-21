@@ -7,8 +7,10 @@ sound** (hand height or phone tilt = brightness, hand roll or phone roll = vibra
 continuous, so camera delay is not felt; triggers are a single-frame pose, so they don't miss.
 
 ## Play
-- **Hands (laptop camera):** move left/right to pick a note, pinch thumb + index to play. Hold to
-  sustain, slide while pinched to glide, raise your hand for brighter, tilt it for vibrato.
+- **Hands (laptop camera):** hand height is the pitch, pinch thumb + index to play. Hold to
+  sustain, move up/down while pinched to glide, move right for brighter, tilt for vibrato.
+  Pitch snapping is adjustable (snap / soft / free theremin). "Teach AirBeats my hand" calibrates
+  the pinch to your hand from three angles.
 - **Touch & tilt (phone):** touch a column to play (multi-touch chords), slide to glide,
   tip the phone toward you for brighter, roll it for vibrato.
 
@@ -35,9 +37,12 @@ python3 -m http.server 8080
 Then open http://localhost:8080.
 
 ## How it works
-- `js/hands.js`: camera + MediaPipe Hand Landmarker (bundled in `vendor/`, no CDN)
-- `js/game.js`: pinch detection (thumb-index gap / hand size, with hysteresis), detection on every
-  camera frame (`requestVideoFrameCallback`), touch + tilt input, timing judgement
+- `js/hands.js` + `js/tracker-worker.js`: camera + MediaPipe Hand Landmarker in a background
+  worker (bundled in `vendor/`), which times GPU vs CPU on your machine and keeps the faster one.
+  Falls back to the main thread if workers are unavailable.
+- `js/game.js`: pinch from 3D world landmarks (gap / palm length, angle independent) with
+  hysteresis, 2-frame debounce and fist rejection; One Euro filtering plus frame-rate
+  interpolation; touch + tilt input; timing judgement
   (Perfect ±80 ms / Good ±170 ms), glass rendering, backing-track scheduler
 - `js/audio.js`: every sound is synthesized with Web Audio (no sample files). Synth voices run
   continuously and are gated, so a note starts in one audio block (~3 ms) after the trigger.

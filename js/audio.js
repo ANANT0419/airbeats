@@ -44,6 +44,7 @@ class Voice {
   }
 
   setPitch(midi, glide) {
+    this.cur = midi;
     const t = this.ctx.currentTime;
     const f = mtof(midi);
     for (const { o, mult } of this.oscs) {
@@ -63,6 +64,15 @@ class Voice {
 
   glide(midi) {
     this.setPitch(midi, true);
+  }
+
+  // Follow a continuously changing (fractional) pitch, called every screen frame.
+  bend(midi) {
+    if (Math.abs(midi - (this.cur ?? midi)) < 0.003) return;
+    this.cur = midi;
+    const t = this.ctx.currentTime;
+    const f = mtof(midi);
+    for (const { o, mult } of this.oscs) o.frequency.setTargetAtTime(f * mult, t, 0.012);
   }
 
   // bright 0..1 opens the filter, vib 0..1 adds vibrato

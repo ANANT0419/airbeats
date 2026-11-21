@@ -1,13 +1,13 @@
 import { AudioEngine } from './audio.js';
-import { startCamera, createHandTracker } from './hands.js';
-import { Game } from './game.js';
+import { startCamera, createHandTracker, createWorkerTracker } from './hands.js';
+import { Game, PINCH_PRESETS } from './game.js';
 import { SONGS } from './songs.js';
 
 const $ = (id) => document.getElementById(id);
 const show = (el, on = true) => el.classList.toggle('hidden', !on);
 
 const audio = new AudioEngine();
-const game = new Game($('stage'), audio, { onStats, onEnd });
+const game = new Game($('stage'), audio, { onStats, onEnd, onTrack });
 window.__airbeats = { game, audio }; // handy for debugging in devtools
 let mode = 'synth';
 let current = null; // current song (null = free play)
@@ -17,13 +17,13 @@ let handsOn = false;
 const SONG_SET = { synth: SONGS.piano, piano: SONGS.piano, drums: SONGS.drums };
 const HINTS = {
   hands: {
-    synth: 'Move your hand left or right to pick a note. Pinch thumb and index finger to play, hold to sustain, slide while pinched to glide. Raise your hand for a brighter sound, tilt it for vibrato.',
-    piano: 'Move your hand over a key, then pinch thumb and index finger to strike it. Open and pinch again for the next note.',
+    synth: 'Your hand height is the pitch. Pinch thumb and index finger to play and hold to sustain. Move up or down while pinched to glide through the notes. Move right for a brighter sound, tilt your hand for vibrato.',
+    piano: 'Your hand height picks the note. Pinch to strike it. Keep pinching and move up or down to run through the notes.',
     drums: 'Move your hand over a pad, then pinch thumb and index finger to hit it. Use both hands.',
   },
   touch: {
-    synth: 'Touch a column to play, hold to sustain, slide to glide. Tilt the phone toward you for a brighter sound, roll it for vibrato.',
-    piano: 'Tap the glass keys. Use several fingers for chords.',
+    synth: 'Touch a row to play, hold to sustain, slide up or down to glide. Tilt the phone toward you for a brighter sound, roll it for vibrato.',
+    piano: 'Tap a row to play its note. Use several fingers for chords.',
     drums: 'Tap the pads. Use both thumbs.',
   },
 };
@@ -53,15 +53,25 @@ $('btn-camera').addEventListener('click', async () => {
     btn.disabled = false;
     return;
   }
+  video.classList.add('live');
+  $('status').textContent = 'Loading hand tracking (first time takes a few seconds)…';
   try {
-    $('status').textContent = 'Loading hand tracking (first time takes a few seconds)…';
-    const tracker = await createHandTracker();
-    game.setSource(video, tracker);
+    // Preferred: tracking in a background worker, so drawing and sound never wait for it.
+    await createWorkerTracker(video, (hands, info) => game.onHands(hands, info));
     handsOn = true;
-    $('notice').textContent = '';
   } catch (e) {
-    console.warn(e);
-    $('notice').textContent = 'Hand tracking could not load, so mouse / touch is on instead.';
+    console.warn('Worker tracking unavailable, using main thread', e);
+    try {
+      game.setSource(video, await createHandTracker());
+      handsOn = true;
+    } catch (e2) {
+      console.warn(e2);
+      $('notice').textContent = 'Hand tracking could not load, so mouse / touch is on instead.';
+    }
+  }
+  if (handsOn) {
+    $('notice').textContent = '';
+    show($('btn-calibrate'));
   }
   openMenu();
 });
@@ -123,7 +133,108 @@ function renderSongs() {
   wrap.appendChild(f);
 }
 
-$('set-pinch').addEventListener('change', (e) => (game.settings.pinch = e.target.value));
+$('set-pinch').addEventListener('change', (e) => {
+  game.settings.pinch = e.target.value;
+  store('pinch', e.target.value);
+});
+$('set-snap').addEventListener('change', (e) => {
+  game.settings.snap = e.target.value;
+  store('snap', e.target.value);
+});
+
+// Restore saved settings and a saved hand calibration
+{
+  const cal = store('calibration');
+  if (cal && Array.isArray(cal)) {
+    game.settings.calibrated = cal;
+    $('opt-mine').disabled = false;
+  }
+  const pinch = store('pinch');
+  if (pinch && (pinch !== 'mine' || cal)) game.settings.pinch = pinch;
+  $('set-pinch').value = game.settings.pinch;
+  const snap = store('snap');
+  if (snap) game.settings.snap = snap;
+  $('set-snap').value = game.settings.snap;
+}
+
+function onTrack({ hands, ms, delegate }) {
+  const chip = $('track-chip');
+  if (!chip) return;
+  chip.textContent = hands ? `${hands} hand${hands > 1 ? 's' : ''} · ${Math.round(ms || 0)} ms${delegate ? ' · ' + delegate : ''}` : 'Show your hand';
+  chip.classList.toggle('lost', !hands);
+}
+
+// ---------- hand calibration: learn this person's open and pinched hand from several angles ----------
+const CAL_STEPS = [
+  { kind: 'open', text: 'Hold one hand up, open, palm facing the camera.' },
+  { kind: 'pinch', text: 'Pinch thumb and index finger together and hold.' },
+  { kind: 'open', text: 'Turn your hand sideways and open it.' },
+  { kind: 'pinch', text: 'Still sideways: pinch and hold.' },
+  { kind: 'open', text: 'Tip your fingers toward the camera and open.' },
+  { kind: 'pinch', text: 'Still tipped: pinch and hold.' },
+];
+let calTimer = null;
+
+$('btn-calibrate').addEventListener('click', () => {
+  show($('menu'), false);
+  show($('calibrate'));
+  const samples = { open: [], pinch: [] };
+  let step = 0;
+  let stepStart = performance.now();
+  const STEP_MS = 2200;
+  clearInterval(calTimer);
+  calTimer = setInterval(() => {
+    const s = CAL_STEPS[step];
+    const r = game.probe.ratio;
+    const elapsed = performance.now() - stepStart;
+    $('cal-step').textContent = `Step ${step + 1} of ${CAL_STEPS.length}`;
+    $('cal-text').textContent = s.text;
+    $('cal-meter').style.width = `${Math.round(Math.min(1, elapsed / STEP_MS) * 100)}%`;
+    $('cal-live').textContent = r == null ? 'No hand seen yet' : `Finger gap: ${r.toFixed(2)}`;
+    // Ignore the first moment of each step while the hand changes pose.
+    if (r != null && elapsed > 700) samples[s.kind].push(r);
+    if (r == null) stepStart = performance.now() - Math.min(elapsed, 700);
+    if (elapsed >= STEP_MS) {
+      step++;
+      stepStart = performance.now();
+      if (step >= CAL_STEPS.length) finishCalibration(samples);
+    }
+  }, 50);
+});
+
+function percentile(a, p) {
+  const s = [...a].sort((x, y) => x - y);
+  return s[Math.min(s.length - 1, Math.floor(p * s.length))];
+}
+
+function finishCalibration(samples) {
+  clearInterval(calTimer);
+  const ok = samples.open.length > 10 && samples.pinch.length > 10;
+  const closed = ok ? percentile(samples.pinch, 0.9) : 0;
+  const open = ok ? percentile(samples.open, 0.1) : 0;
+  if (!ok || open - closed < 0.15) {
+    $('cal-text').textContent = 'That did not work: I could not tell your open and pinched hand apart. Try again with your hand clearly in view and good light.';
+    $('cal-live').textContent = '';
+    return;
+  }
+  const on = Math.max(0.12, closed + (open - closed) * 0.3);
+  const off = Math.max(on + 0.08, closed + (open - closed) * 0.5);
+  game.settings.calibrated = [on, off];
+  game.settings.pinch = 'mine';
+  store('calibration', [on, off]);
+  store('pinch', 'mine');
+  $('opt-mine').disabled = false;
+  $('set-pinch').value = 'mine';
+  $('cal-step').textContent = 'Done';
+  $('cal-text').textContent = `Learned your hand. Pinch now triggers at ${on.toFixed(2)} and releases at ${off.toFixed(2)} (standard is ${PINCH_PRESETS.normal[0]} / ${PINCH_PRESETS.normal[1]}).`;
+  $('cal-live').textContent = '';
+}
+
+$('btn-cal-done').addEventListener('click', () => {
+  clearInterval(calTimer);
+  show($('calibrate'), false);
+  show($('menu'));
+});
 $('set-lat').addEventListener('input', (e) => {
   game.settings.latency = Number(e.target.value) / 1000;
   $('lat-val').textContent = `${e.target.value} ms`;
@@ -138,6 +249,7 @@ function play(song) {
   show($('pause'), false);
   show($('hud'));
   show($('hud-stats'), !!song);
+  show($('track-chip'), handsOn);
   const names = { synth: 'Synth', piano: 'Piano', drums: 'Drums' };
   $('hud-song').textContent = song ? `${song.title} · ${names[mode]}` : `Free Play · ${names[mode]}`;
   $('hud-combo').textContent = '';

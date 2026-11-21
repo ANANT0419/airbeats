@@ -64,9 +64,67 @@ export async function createHandTracker() {
       return (res.landmarks || []).map((landmarks, i) => ({
         side: res.handedness?.[i]?.[0]?.categoryName || String(i),
         landmarks,
+        world: res.worldLandmarks?.[i] || null,
       }));
     },
   };
+}
+
+// Preferred tracker: a background worker. Each new camera frame is copied to an ImageBitmap and
+// sent over; while the worker is busy, newer frames replace older ones, so results never queue up.
+// onResult(hands, info) is called with the same shape as detect() above.
+export function createWorkerTracker(video, onResult) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = new Worker(new URL('./tracker-worker.js', import.meta.url), { type: 'module' });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error('Hand tracking worker timed out'));
+    }, 30000);
+    let busy = false;
+    let running = false;
+    const pump = () => {
+      if (!running) return;
+      if (!busy && video.readyState >= 2) {
+        busy = true;
+        const ts = performance.now();
+        createImageBitmap(video)
+          .then((bitmap) => worker.postMessage({ type: 'frame', bitmap, ts }, [bitmap]))
+          .catch(() => (busy = false));
+      }
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(pump);
+      else requestAnimationFrame(pump);
+    };
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') {
+        clearTimeout(timer);
+        if (!m.ok) {
+          worker.terminate();
+          reject(new Error(m.error || 'Hand tracking failed to start'));
+          return;
+        }
+        running = true;
+        pump();
+        resolve({ delegate: m.delegate, worker: true, stop: () => ((running = false), worker.terminate()) });
+      } else if (m.type === 'result') {
+        busy = false;
+        onResult(m.hands, { ts: m.ts, ms: m.ms, latency: performance.now() - m.ts });
+      } else if (m.type === 'error') {
+        busy = false;
+      }
+    };
+    worker.onerror = (e) => {
+      clearTimeout(timer);
+      reject(e);
+    };
+    worker.postMessage({ type: 'init', sources: SOURCES });
+  });
 }
 
 export const HAND_CONNECTIONS = [
