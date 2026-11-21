@@ -67,6 +67,8 @@
           <input id="set-speed" type="range" min="0.5" max="1" step="0.05" value="0.8" />
         </label>
         <label class="row"><input id="set-nums" type="checkbox" /> Show pinch numbers (for tuning)</label>
+        <button id="btn-copylog" class="btn ghost" type="button">Copy pinch log (last 15 seconds)</button>
+        <textarea id="log-out" class="log hidden" readonly aria-label="Pinch log"></textarea>
         <label>Camera delay fix <span id="lat-val">50 ms</span>
           <input id="set-lat" type="range" min="0" max="200" step="10" value="50" />
         </label>

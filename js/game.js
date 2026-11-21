@@ -344,8 +344,7 @@ export class Game {
           fx: new OneEuro(),
           fy: new OneEuro(),
           tx: hd.cur.x, ty: hd.cur.y, x: hd.cur.x, y: hd.cur.y, vx: 0, vy: 0,
-          pinched: false, onCount: 0, offCount: 0, lane: -1, voice: null, seenAt: now,
-          openRef: 0.9, prevGap: hd.gap,
+          pinched: false, lane: -1, voice: null, seenAt: now,
         };
         this.cursors.push(c);
       }
@@ -365,48 +364,74 @@ export class Game {
       c.seenAt = now;
       c.roll = lerp(c.roll ?? hd.roll, hd.roll, 0.4);
 
-      // How pinched is this hand? 0 = wide open, 1 = clearly pinched.
-      let on, off, closing;
+      // How closed is this hand? Small = pinched. With a learned model it is 1 - probability.
+      let g, on, off, closeDelta, openDelta;
       if (model) {
-        const p = model.prob(hd.f);
-        c.gap = 1 - p;
-        on = 0.4; // p > 0.6
-        off = 0.65; // p < 0.35
-        closing = false;
+        g = 1 - model.prob(hd.f);
+        on = 0.4; // probability > 0.6
+        off = 0.6; // probability < 0.4
+        closeDelta = 0.35;
+        openDelta = 0.25;
       } else {
-        const g = hd.gap;
-        // Learn this hand's open size (rises fast, decays slowly), and scale the thresholds to it.
-        c.openRef = g > c.openRef ? lerp(c.openRef, g, 0.3) : lerp(c.openRef, g, 0.003);
-        on = clamp(Math.max(presetOn, c.openRef * 0.45), presetOn, presetOn + 0.15);
-        off = on + 0.16;
-        // A fast closing movement counts as a pinch a frame early.
-        closing = g < off && c.prevGap - g > 0.22 * c.openRef;
-        c.prevGap = g;
-        c.gap = g;
+        g = hd.gap;
+        on = presetOn;
+        off = presetOn + 0.14;
+        closeDelta = 0.2; // about 1.8 cm of closing movement
+        openDelta = 0.12; // about 1 cm of opening movement
       }
+      const sinceLast = Math.min(0.2, now - (c.lastT ?? now));
+      c.lastT = now;
+      c.gap = g;
       c.on = on;
       c.off = off;
 
       if (!c.pinched) {
-        c.onCount = c.gap < on || closing ? c.onCount + 1 : 0;
-        if (c.onCount >= 1) {
+        // Recent widest gap (slowly forgets), so a clear closing movement counts even if the
+        // fingers do not read as fully touching.
+        c.peak = Math.max(g, (c.peak ?? g) - 0.8 * sinceLast);
+        // After a release, the fingers must clearly open before "closed enough" can fire again
+        // (a real new closing movement still works at once).
+        if (g > on + 0.06) c.armed = true;
+        const closedEnough = g < on && c.armed !== false;
+        const closingMove = g < on + 0.15 && c.peak - g > closeDelta;
+        if (closedEnough || closingMove) {
           c.pinched = true;
-          c.offCount = 0;
-          c.x = fx;
-          c.y = fy;
-          c.lane = -1;
-          this.press(c, this.laneAt(fx, fy), this.handExpr(c), 'hand', fx, fy);
-          c.pop = 1;
+          c.pressedAt = now;
+          c.trough = g;
+          const lane = this.laneAt(fx, fy, c.lastLane ?? -1);
+          if (now - (c.releasedAt ?? -1) < 0.15 && lane === c.lastLane && lane !== -1) {
+            // Back within 150 ms on the same note: a tracking blip, not a new note. Resume quietly.
+            c.lane = lane;
+            if (this.mode === 'synth') {
+              c.voice = this.audio.voice();
+              c.voice.on(this.pitchAt(c.y, lane));
+            }
+            this.logPinch(hd, c, 'resume');
+          } else {
+            c.x = fx;
+            c.y = fy;
+            c.lane = -1;
+            this.press(c, lane === -1 ? this.laneAt(fx, fy) : lane, this.handExpr(c), 'hand', fx, fy);
+            c.pop = 1;
+            this.logPinch(hd, c, 'on');
+          }
         }
       } else {
-        // Release needs three frames in a row: brief tracking wobble never chops a note.
-        c.offCount = c.gap > off ? c.offCount + 1 : 0;
-        if (c.offCount >= 3) {
+        // Release the moment the fingers start to separate: measured from the tightest point
+        // of this pinch, not from a fixed "open" line, so a small lift is enough.
+        c.trough = Math.min(c.trough, g);
+        const opened = g > off || g - c.trough > openDelta;
+        if (opened && now - c.pressedAt > 0.05) {
           c.pinched = false;
-          c.onCount = 0;
+          c.peak = g;
+          c.armed = false;
+          c.releasedAt = now;
+          c.lastLane = c.lane;
           this.release(c);
+          this.logPinch(hd, c, 'off');
         }
       }
+      this.logPinch(hd, c);
     }
     // Briefly-lost hands keep their note (edge-on hands and motion blur drop frames).
     this.cursors = this.cursors.filter((c) => {
@@ -416,6 +441,17 @@ export class Game {
     });
     this.probe = { hands: this.hands.length, feats: this.hands.map((h) => h.f) };
     this.hooks.onTrack?.({ hands: this.hands.length, ms: info.ms, delegate: info.delegate });
+  }
+
+  // Rolling log of the last ~15 s of pinch readings, for "Copy pinch log" in Settings.
+  logPinch(hd, c, event) {
+    if (!this.pinchLog) this.pinchLog = [];
+    const r = (v) => Math.round(v * 1000) / 1000;
+    this.pinchLog.push({
+      t: r(performance.now() / 1000), side: hd.side?.[0], ev: event || '', gap: r(c.gap),
+      w: r(hd.f[0]), img: r(hd.f[5]), on: r(c.on), off: r(c.off), held: c.pinched ? 1 : 0,
+    });
+    if (this.pinchLog.length > 900) this.pinchLog.splice(0, this.pinchLog.length - 900);
   }
 
   handExpr(c) {

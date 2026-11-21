@@ -30,9 +30,9 @@ export function handFeatures(lm, world, vw, vh) {
   return f;
 }
 
-// Rule-based gap: mostly the 3D estimate, partly the image one (each fails at different angles).
+// Rule-based gap: half the 3D estimate, half the image one (each fails at different angles).
 export function ruleGap(f) {
-  return 0.6 * f[0] + 0.4 * f[5];
+  return 0.5 * f[0] + 0.5 * f[5];
 }
 
 export class PinchModel {

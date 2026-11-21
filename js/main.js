@@ -171,6 +171,22 @@ $('set-speed').addEventListener('input', (e) => {
   store('speed', game.settings.speed);
 });
 $('set-nums').addEventListener('change', (e) => (game.settings.numbers = e.target.checked));
+// Diagnostics: copy the last few seconds of raw pinch readings to paste into a bug report.
+$('btn-copylog').addEventListener('click', () => {
+  const log = game.pinchLog || [];
+  const text = JSON.stringify({
+    pinch: game.settings.pinch, model: !!game.model, track: $('track-chip').textContent, entries: log.length,
+    cols: 't side event gap world img on off held', rows: log.map((e) => [e.t, e.side, e.ev, e.gap, e.w, e.img, e.on, e.off, e.held].join(' ')),
+  });
+  const out = $('log-out');
+  out.value = text;
+  show(out);
+  out.select();
+  navigator.clipboard?.writeText(text).then(
+    () => ($('btn-copylog').textContent = 'Copied. Paste it in the chat.'),
+    () => ($('btn-copylog').textContent = 'Select the text below and copy it.')
+  );
+});
 
 function onTrack({ hands, ms, delegate }) {
   const chip = $('track-chip');
