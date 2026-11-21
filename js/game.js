@@ -1,5 +1,6 @@
 import { PIANO_LANES, DRUM_LANES, CHORDS } from './songs.js';
 import { HAND_CONNECTIONS } from './hands.js';
+import { handFeatures, ruleGap, PinchModel } from './pinch.js';
 
 // Gesture model (see README for the research behind it):
 //   * TRIGGER: a pinch (thumb + index), measured in real 3D distance so it works at any hand
@@ -11,13 +12,16 @@ import { HAND_CONNECTIONS } from './hands.js';
 //     little prediction, so movement is drawn and heard at screen refresh rate, not camera rate.
 
 const TAU = Math.PI * 2;
-const PERFECT = 0.08;
-const GOOD = 0.17;
+// Timing windows (seconds) for Timed play. Relaxed play waits for you instead.
+const PERFECT = 0.12;
+const GOOD = 0.26;
+const EARLY_OK = 0.6; // Relaxed: how early a pinch still counts for the next note
 const LEAD_BEATS = 4;
 const HUD_H = 96;
 // Pinch thresholds as thumb-index gap / palm length (wrist to middle knuckle), in 3D.
 // About 0.30 is roughly 2.5-3 cm on an adult hand.
-export const PINCH_PRESETS = { easy: [0.4, 0.56], normal: [0.3, 0.45], firm: [0.22, 0.36] };
+// Starting points; each hand's thresholds then adapt to its own open size.
+export const PINCH_PRESETS = { easy: [0.5, 0.66], normal: [0.42, 0.58], firm: [0.32, 0.48] };
 const SNAP = { snap: 1, soft: 0.75, free: 0 };
 
 const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
@@ -70,7 +74,7 @@ export class Game {
     this.ctx = canvas.getContext('2d');
     this.audio = audio;
     this.hooks = hooks; // { onStats, onEnd, onTrack }
-    this.settings = { pinch: 'normal', calibrated: null, snap: 'snap', latency: 0.05, skeleton: true };
+    this.settings = { pinch: 'normal', snap: 'snap', style: 'relaxed', speed: 0.8, latency: 0.05, skeleton: true, numbers: false };
     this.mode = null; // 'synth' | 'piano' | 'drums'
     this.lanes = [];
     this.flash = [];
@@ -85,7 +89,8 @@ export class Game {
     this.song = null;
     this.notes = [];
     this.lastHud = 0;
-    this.probe = { ratio: null, hands: 0 };
+    this.probe = { hands: 0, feats: [] };
+    this.model = null; // personal pinch classifier, from calibration
     window.addEventListener('resize', () => this.resize());
     this.resize();
     this.bindPointer();
@@ -120,10 +125,8 @@ export class Game {
     loop();
   }
 
-  pinchThresholds() {
-    return this.settings.pinch === 'mine' && this.settings.calibrated
-      ? this.settings.calibrated
-      : PINCH_PRESETS[this.settings.pinch] || PINCH_PRESETS.normal;
+  setModel(data) {
+    this.model = data ? new PinchModel(data) : null;
   }
 
   setTilt(beta, gamma) {
@@ -311,33 +314,26 @@ export class Game {
     const now = performance.now() / 1000;
     const { vw, vh, dw, dh, ox, oy } = this.videoMap();
     const toScreen = (p) => ({ x: this.w - (ox + p.x * dw), y: oy + p.y * dh });
-    const img = (a, b) => Math.hypot((a.x - b.x) * vw, (a.y - b.y) * vh, (a.z - b.z) * vw);
-    const wd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
     this.hands = raw.map((hand) => {
       const lm = hand.landmarks;
-      const W = hand.world;
       const pts = lm.map(toScreen);
-      // Pinch measured in metres (world landmarks), which does not change with hand angle or
-      // distance from the camera. Image-space measure is the fallback.
-      const d = W ? wd : img;
-      const P = W || lm;
-      const palm = d(P[0], P[9]) || 1;
-      const gap = d(P[4], P[8]) / palm;
-      // A fist brings the middle AND ring fingertips in to the thumb too: that is not a pinch.
-      const others = Math.max(d(P[4], P[12]), d(P[4], P[16])) / palm;
+      const f = handFeatures(lm, hand.world, vw, vh);
       const cur = { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 };
       const roll = Math.atan2(pts[9].x - pts[0].x, pts[0].y - pts[9].y);
-      return { pts, gap, others, cur, roll };
+      return { pts, f, gap: ruleGap(f), cur, roll, side: hand.side };
     });
 
-    const [onT, offT] = this.pinchThresholds();
+    const model = this.settings.pinch === 'mine' ? this.model : null;
+    const [presetOn] = PINCH_PRESETS[this.settings.pinch] || PINCH_PRESETS.normal;
     const free = new Set(this.cursors);
+    // Match each hand to last frame's cursor: nearest, preferring the same left/right label,
+    // so two hands close together do not swap.
     for (const hd of this.hands) {
       let c = null;
-      let bd = this.md * 0.3;
+      let bd = this.md * 0.35;
       for (const k of free) {
-        const dd = Math.hypot(k.tx - hd.cur.x, k.ty - hd.cur.y);
+        const dd = Math.hypot(k.tx - hd.cur.x, k.ty - hd.cur.y) + (k.side === hd.side ? 0 : this.md * 0.12);
         if (dd < bd) {
           bd = dd;
           c = k;
@@ -349,10 +345,12 @@ export class Game {
           fy: new OneEuro(),
           tx: hd.cur.x, ty: hd.cur.y, x: hd.cur.x, y: hd.cur.y, vx: 0, vy: 0,
           pinched: false, onCount: 0, offCount: 0, lane: -1, voice: null, seenAt: now,
+          openRef: 0.9, prevGap: hd.gap,
         };
         this.cursors.push(c);
       }
       free.delete(c);
+      c.side = hd.side;
       const dt = Math.max(1 / 120, now - c.seenAt);
       const fx = c.fx.filter(hd.cur.x, now);
       const fy = c.fy.filter(hd.cur.y, now);
@@ -365,27 +363,45 @@ export class Game {
       c.tx = fx;
       c.ty = fy;
       c.seenAt = now;
-      c.gap = hd.gap;
-      c.on = onT;
-      c.off = offT;
       c.roll = lerp(c.roll ?? hd.roll, hd.roll, 0.4);
 
-      // Pinch state with debounce: a clear pinch fires at once; a borderline one needs two frames.
-      const isFist = hd.others < (onT + offT) / 2;
+      // How pinched is this hand? 0 = wide open, 1 = clearly pinched.
+      let on, off, closing;
+      if (model) {
+        const p = model.prob(hd.f);
+        c.gap = 1 - p;
+        on = 0.4; // p > 0.6
+        off = 0.65; // p < 0.35
+        closing = false;
+      } else {
+        const g = hd.gap;
+        // Learn this hand's open size (rises fast, decays slowly), and scale the thresholds to it.
+        c.openRef = g > c.openRef ? lerp(c.openRef, g, 0.3) : lerp(c.openRef, g, 0.003);
+        on = clamp(Math.max(presetOn, c.openRef * 0.45), presetOn, presetOn + 0.15);
+        off = on + 0.16;
+        // A fast closing movement counts as a pinch a frame early.
+        closing = g < off && c.prevGap - g > 0.22 * c.openRef;
+        c.prevGap = g;
+        c.gap = g;
+      }
+      c.on = on;
+      c.off = off;
+
       if (!c.pinched) {
-        c.onCount = hd.gap < onT && !isFist ? c.onCount + 1 : 0;
-        if (c.onCount >= (hd.gap < onT * 0.75 ? 1 : 2)) {
+        c.onCount = c.gap < on || closing ? c.onCount + 1 : 0;
+        if (c.onCount >= 1) {
           c.pinched = true;
           c.offCount = 0;
-          c.x = fx; // snap the drawn cursor to the true spot for the attack
+          c.x = fx;
           c.y = fy;
           c.lane = -1;
           this.press(c, this.laneAt(fx, fy), this.handExpr(c), 'hand', fx, fy);
           c.pop = 1;
         }
       } else {
-        c.offCount = hd.gap > offT ? c.offCount + 1 : 0;
-        if (c.offCount >= 2) {
+        // Release needs three frames in a row: brief tracking wobble never chops a note.
+        c.offCount = c.gap > off ? c.offCount + 1 : 0;
+        if (c.offCount >= 3) {
           c.pinched = false;
           c.onCount = 0;
           this.release(c);
@@ -394,12 +410,11 @@ export class Game {
     }
     // Briefly-lost hands keep their note (edge-on hands and motion blur drop frames).
     this.cursors = this.cursors.filter((c) => {
-      if (!free.has(c) || now - c.seenAt < 0.3) return true;
+      if (!free.has(c) || now - c.seenAt < 0.35) return true;
       if (c.pinched) this.release(c);
       return false;
     });
-    const gaps = this.hands.map((h) => h.gap);
-    this.probe = { ratio: gaps.length ? Math.min(...gaps) : null, hands: this.hands.length };
+    this.probe = { hands: this.hands.length, feats: this.hands.map((h) => h.f) };
     this.hooks.onTrack?.({ hands: this.hands.length, ms: info.ms, delegate: info.delegate });
   }
 
@@ -436,9 +451,15 @@ export class Game {
     this.audio.warmUp();
     this.song = song;
     this.paused = false;
-    const spb = 60 / (song?.bpm || 100);
+    this.relaxed = this.settings.style !== 'timed';
+    // Relaxed plays a little slower by default; Timed uses the Speed setting.
+    const tempo = this.relaxed ? Math.min(this.settings.speed, 0.85) : this.settings.speed;
+    const spb = 60 / ((song?.bpm || 100) * tempo);
     this.spb = spb;
-    this.approach = this.mode === 'drums' ? 1.6 : 2.4;
+    this.approach = this.mode === 'drums' ? 2.0 : 3.0;
+    this.clock = -0.5;
+    this.waiting = false;
+    this.lastChord = -1;
     this.stats = { score: 0, combo: 0, maxCombo: 0, perfect: 0, good: 0, miss: 0, wrong: 0 };
     this.recent = [1, 0.5, 1, 0.5];
     this.popups = [];
@@ -452,7 +473,7 @@ export class Game {
         .sort((a, b) => a.t - b.t);
       this.endTime = this.notes[this.notes.length - 1].t + 2;
       this.buildBacking(song);
-      this.audio.setBackingLevel(0.6);
+      this.audio.setBackingLevel(this.relaxed ? 0.85 : 0.6);
     } else {
       this.notes = [];
       this.audio.setBackingLevel(0);
@@ -464,6 +485,10 @@ export class Game {
     const spb = this.spb;
     const ev = [];
     for (let b = 0; b < LEAD_BEATS; b++) ev.push({ t: b * spb, type: 'count', accent: b === 0 });
+    if (this.relaxed) {
+      this.events = ev;
+      return;
+    }
     let beat = LEAD_BEATS;
     for (const ch of song.chords) {
       const c = CHORDS[ch.name];
@@ -515,7 +540,45 @@ export class Game {
   }
 
   get songTime() {
-    return this.audio.now - this.startTime;
+    return this.clock;
+  }
+
+  // The song clock. Timed: follows the audio clock. Relaxed: also moves in real time, but
+  // stops at the next note until you play it, so you are never rushed.
+  tick(dt) {
+    const audioT = this.audio.now - this.startTime;
+    const lead = LEAD_BEATS * this.spb;
+    if (!this.relaxed || audioT < lead) {
+      this.clock = audioT;
+      this.waiting = false;
+      return;
+    }
+    this.clock += dt;
+    const next = this.notes.find((n) => !n.state);
+    this.waiting = !!next && this.clock >= next.t;
+    if (this.waiting) this.clock = next.t;
+  }
+
+  // Relaxed accompaniment: chords and bass follow your playing instead of a fixed clock.
+  accompany(note) {
+    if (!this.song) return;
+    const beat = note.t / this.spb - LEAD_BEATS;
+    let acc = 0;
+    let idx = -1;
+    for (let i = 0; i < this.song.chords.length; i++) {
+      if (beat < acc + this.song.chords[i].beats) {
+        idx = i;
+        break;
+      }
+      acc += this.song.chords[i].beats;
+    }
+    if (idx < 0 || idx === this.lastChord) return;
+    this.lastChord = idx;
+    const c = CHORDS[this.song.chords[idx].name];
+    const t = this.audio.now;
+    const dur = Math.max(1.2, this.song.chords[idx].beats * this.spb);
+    this.audio.pad(c.notes, t, dur);
+    this.audio.bass(c.root, t, Math.min(dur, 1.6));
   }
 
   judgeSpot(l) {
@@ -525,14 +588,15 @@ export class Game {
   judge(lane, source) {
     if (!this.song || !this.playing) return;
     const l = this.lanes[lane];
-    const t = this.songTime - (source === 'hand' ? this.settings.latency : 0);
+    const t = this.songTime - (source === 'hand' && !this.relaxed ? this.settings.latency : 0);
+    const early = this.relaxed ? EARLY_OK : GOOD;
     let best = null;
     let bd = Infinity;
     for (const n of this.notes) {
-      if (n.t - t > GOOD) break;
+      if (n.t - t > early) break;
       if (n.state || n.lane !== lane) continue;
       const d = Math.abs(n.t - t);
-      if (d <= GOOD && d < bd) {
+      if ((d <= GOOD || (this.relaxed && n.t - t <= EARLY_OK)) && d < bd) {
         bd = d;
         best = n;
       }
@@ -540,8 +604,9 @@ export class Game {
     const s = this.stats;
     const spot = this.judgeSpot(l);
     if (best) {
-      const perfect = bd <= PERFECT;
+      const perfect = bd <= (this.relaxed ? 0.3 : PERFECT);
       best.state = perfect ? 'perfect' : 'good';
+      if (this.relaxed) this.accompany(best);
       s.combo++;
       s.maxCombo = Math.max(s.maxCombo, s.combo);
       s[best.state]++;
@@ -550,6 +615,8 @@ export class Game {
       this.recent.push(perfect ? 1 : 0.8);
       this.popup(spot.x, spot.y, perfect ? 'PERFECT' : 'GOOD', perfect ? '#7dffcf' : '#9ad7ff');
     } else {
+      // Relaxed: a pinch with no note coming up is just you playing; no penalty.
+      if (this.relaxed && !this.notes.some((n) => !n.state && Math.abs(n.t - t) <= EARLY_OK)) return;
       s.wrong++;
       s.combo = 0;
       this.recent.push(0);
@@ -621,14 +688,15 @@ export class Game {
 
     let songT = 0;
     if (this.playing && this.song && !this.paused) {
+      this.tick(dt);
       this.schedule();
-      this.checkMisses();
+      if (!this.relaxed) this.checkMisses();
       const acc = this.recent.slice(-8);
-      const level = 0.1 + 0.9 * (acc.reduce((a, b) => a + b, 0) / acc.length);
+      const level = this.relaxed ? 0.85 : 0.1 + 0.9 * (acc.reduce((a, b) => a + b, 0) / acc.length);
       this.audio.setBackingLevel(level);
       this.bandLevel = level;
       songT = this.songTime;
-      if (songT > this.endTime) {
+      if (songT > this.endTime && this.notes.every((n) => n.state)) {
         this.playing = false;
         this.releaseAll();
         this.audio.setBackingLevel(0);
@@ -728,6 +796,8 @@ export class Game {
       if (d > this.approach) break;
       if (n.state || d < -GOOD) continue;
       glow[n.lane] = Math.max(glow[n.lane], 1 - Math.max(0, d) / this.approach);
+      // The note the song is waiting on breathes gently.
+      if (this.waiting && d <= 0.001) glow[n.lane] = 0.75 + 0.25 * Math.sin(performance.now() / 160);
     }
     return glow;
   }
@@ -830,6 +900,9 @@ export class Game {
         ctx.beginPath();
         ctx.arc(c.x, c.y, 46, 0, TAU);
         ctx.fill();
+      }
+      if (this.settings.numbers) {
+        this.text(`${c.side?.[0] || ''} ${c.gap.toFixed(2)} / on<${c.on.toFixed(2)}`, c.x, c.y + 36, 12, 0.9, 'center', 600);
       }
       if (c.pop > 0) c.pop = Math.max(0, c.pop - dt * 4);
     }

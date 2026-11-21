@@ -39,7 +39,7 @@
       </div>
       <p id="mode-hint" class="hint"></p>
       <div id="songs" class="songs"></div>
-      <button id="btn-calibrate" class="btn ghost hidden">Teach AirBeats my hand (15 seconds)</button>
+      <button id="btn-calibrate" class="btn ghost hidden">Teach AirBeats my hands (20 seconds)</button>
       <details class="settings">
         <summary>Settings</summary>
         <label>Pinch
@@ -47,7 +47,7 @@
             <option value="easy">Easy (fingers close)</option>
             <option value="normal" selected>Normal (fingers touch)</option>
             <option value="firm">Firm (squeeze)</option>
-            <option value="mine" id="opt-mine" disabled>My hand (calibrated)</option>
+            <option value="mine" id="opt-mine" disabled>My hands (learned)</option>
           </select>
         </label>
         <label>Pitch
@@ -57,6 +57,16 @@
             <option value="free">Free (theremin)</option>
           </select>
         </label>
+        <label>Play style
+          <select id="set-style">
+            <option value="relaxed" selected>Relaxed: the song waits for you</option>
+            <option value="timed">Timed: keep up with the band</option>
+          </select>
+        </label>
+        <label>Speed <span id="speed-val">80%</span>
+          <input id="set-speed" type="range" min="0.5" max="1" step="0.05" value="0.8" />
+        </label>
+        <label class="row"><input id="set-nums" type="checkbox" /> Show pinch numbers (for tuning)</label>
         <label>Camera delay fix <span id="lat-val">50 ms</span>
           <input id="set-lat" type="range" min="0" max="200" step="10" value="50" />
         </label>

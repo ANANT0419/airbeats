@@ -1,6 +1,7 @@
 import { AudioEngine } from './audio.js';
 import { startCamera, createHandTracker, createWorkerTracker } from './hands.js';
-import { Game, PINCH_PRESETS } from './game.js';
+import { Game } from './game.js';
+import { PinchModel } from './pinch.js';
 import { SONGS } from './songs.js';
 
 const $ = (id) => document.getElementById(id);
@@ -134,6 +135,7 @@ function renderSongs() {
 }
 
 $('set-pinch').addEventListener('change', (e) => {
+  if (e.target.value === 'mine' && !game.model) return;
   game.settings.pinch = e.target.value;
   store('pinch', e.target.value);
 });
@@ -142,20 +144,33 @@ $('set-snap').addEventListener('change', (e) => {
   store('snap', e.target.value);
 });
 
-// Restore saved settings and a saved hand calibration
+// Restore saved settings and a saved personal pinch model
 {
-  const cal = store('calibration');
-  if (cal && Array.isArray(cal)) {
-    game.settings.calibrated = cal;
+  const model = store('pinchModel');
+  if (model && Array.isArray(model.w)) {
+    game.setModel(model);
     $('opt-mine').disabled = false;
   }
   const pinch = store('pinch');
-  if (pinch && (pinch !== 'mine' || cal)) game.settings.pinch = pinch;
+  if (pinch && (pinch !== 'mine' || model)) game.settings.pinch = pinch;
   $('set-pinch').value = game.settings.pinch;
-  const snap = store('snap');
-  if (snap) game.settings.snap = snap;
-  $('set-snap').value = game.settings.snap;
+  for (const [id, key] of [['set-snap', 'snap'], ['set-style', 'style'], ['set-speed', 'speed']]) {
+    const v = store(key);
+    if (v != null) game.settings[key] = v;
+    $(id).value = game.settings[key];
+  }
+  $('speed-val').textContent = `${Math.round(game.settings.speed * 100)}%`;
 }
+$('set-style').addEventListener('change', (e) => {
+  game.settings.style = e.target.value;
+  store('style', e.target.value);
+});
+$('set-speed').addEventListener('input', (e) => {
+  game.settings.speed = Number(e.target.value);
+  $('speed-val').textContent = `${Math.round(game.settings.speed * 100)}%`;
+  store('speed', game.settings.speed);
+});
+$('set-nums').addEventListener('change', (e) => (game.settings.numbers = e.target.checked));
 
 function onTrack({ hands, ms, delegate }) {
   const chip = $('track-chip');
@@ -164,36 +179,42 @@ function onTrack({ hands, ms, delegate }) {
   chip.classList.toggle('lost', !hands);
 }
 
-// ---------- hand calibration: learn this person's open and pinched hand from several angles ----------
+// ---------- hand calibration: record both hands open and pinched from several angles, then
+// train a small pinch classifier for this person (runs in the browser, nothing is uploaded).
 const CAL_STEPS = [
-  { kind: 'open', text: 'Hold one hand up, open, palm facing the camera.' },
-  { kind: 'pinch', text: 'Pinch thumb and index finger together and hold.' },
-  { kind: 'open', text: 'Turn your hand sideways and open it.' },
-  { kind: 'pinch', text: 'Still sideways: pinch and hold.' },
-  { kind: 'open', text: 'Tip your fingers toward the camera and open.' },
-  { kind: 'pinch', text: 'Still tipped: pinch and hold.' },
+  { y: 0, text: 'Hold up both hands, open, palms facing the camera.' },
+  { y: 1, text: 'Pinch thumb and index finger on both hands, and hold.' },
+  { y: 0, text: 'Turn both hands sideways, open.' },
+  { y: 1, text: 'Still sideways: pinch and hold.' },
+  { y: 0, text: 'Tip your fingers toward the camera, open.' },
+  { y: 1, text: 'Still tipped: pinch and hold.' },
+  { y: 0, text: 'Relax your hands, fingers loosely curled but NOT touching.' },
+  { y: 1, text: 'Pinch with your other fingers curled in, and hold.' },
 ];
 let calTimer = null;
 
 $('btn-calibrate').addEventListener('click', () => {
   show($('menu'), false);
   show($('calibrate'));
-  const samples = { open: [], pinch: [] };
+  const samples = [];
   let step = 0;
   let stepStart = performance.now();
-  const STEP_MS = 2200;
+  const STEP_MS = 2400;
   clearInterval(calTimer);
   calTimer = setInterval(() => {
     const s = CAL_STEPS[step];
-    const r = game.probe.ratio;
-    const elapsed = performance.now() - stepStart;
+    const { hands, feats } = game.probe;
+    let elapsed = performance.now() - stepStart;
+    if (!hands) {
+      // Wait for hands before the step's time runs.
+      stepStart = performance.now() - Math.min(elapsed, 700);
+      elapsed = performance.now() - stepStart;
+    }
     $('cal-step').textContent = `Step ${step + 1} of ${CAL_STEPS.length}`;
     $('cal-text').textContent = s.text;
     $('cal-meter').style.width = `${Math.round(Math.min(1, elapsed / STEP_MS) * 100)}%`;
-    $('cal-live').textContent = r == null ? 'No hand seen yet' : `Finger gap: ${r.toFixed(2)}`;
-    // Ignore the first moment of each step while the hand changes pose.
-    if (r != null && elapsed > 700) samples[s.kind].push(r);
-    if (r == null) stepStart = performance.now() - Math.min(elapsed, 700);
+    $('cal-live').textContent = hands ? `${hands} hand${hands > 1 ? 's' : ''} seen · ${samples.length} samples` : 'No hands seen yet';
+    if (hands && elapsed > 800) for (const f of feats) samples.push({ f, y: s.y });
     if (elapsed >= STEP_MS) {
       step++;
       stepStart = performance.now();
@@ -202,32 +223,31 @@ $('btn-calibrate').addEventListener('click', () => {
   }, 50);
 });
 
-function percentile(a, p) {
-  const s = [...a].sort((x, y) => x - y);
-  return s[Math.min(s.length - 1, Math.floor(p * s.length))];
-}
-
 function finishCalibration(samples) {
   clearInterval(calTimer);
-  const ok = samples.open.length > 10 && samples.pinch.length > 10;
-  const closed = ok ? percentile(samples.pinch, 0.9) : 0;
-  const open = ok ? percentile(samples.open, 0.1) : 0;
-  if (!ok || open - closed < 0.15) {
-    $('cal-text').textContent = 'That did not work: I could not tell your open and pinched hand apart. Try again with your hand clearly in view and good light.';
+  const pos = samples.filter((s) => s.y).length;
+  if (pos < 20 || samples.length - pos < 20) {
+    $('cal-step').textContent = 'Try again';
+    $('cal-text').textContent = 'I did not see your hands clearly enough. Try again with both hands in view and good, even light.';
     $('cal-live').textContent = '';
     return;
   }
-  const on = Math.max(0.12, closed + (open - closed) * 0.3);
-  const off = Math.max(on + 0.08, closed + (open - closed) * 0.5);
-  game.settings.calibrated = [on, off];
+  const model = PinchModel.train(samples);
+  if (model.acc < 0.8) {
+    $('cal-step').textContent = 'Try again';
+    $('cal-text').textContent = `I could only tell open from pinched ${Math.round(model.acc * 100)}% of the time. Try again and make the pinch clear: fingertips touching.`;
+    $('cal-live').textContent = '';
+    return;
+  }
+  game.setModel(model.toJSON());
   game.settings.pinch = 'mine';
-  store('calibration', [on, off]);
+  store('pinchModel', model.toJSON());
   store('pinch', 'mine');
   $('opt-mine').disabled = false;
   $('set-pinch').value = 'mine';
   $('cal-step').textContent = 'Done';
-  $('cal-text').textContent = `Learned your hand. Pinch now triggers at ${on.toFixed(2)} and releases at ${off.toFixed(2)} (standard is ${PINCH_PRESETS.normal[0]} / ${PINCH_PRESETS.normal[1]}).`;
-  $('cal-live').textContent = '';
+  $('cal-text').textContent = `Learned your hands from ${samples.length} samples. It tells open from pinched ${Math.round(model.acc * 100)}% of the time.`;
+  $('cal-live').textContent = 'Pinch is now set to "My hands". You can switch back in Settings.';
 }
 
 $('btn-cal-done').addEventListener('click', () => {
